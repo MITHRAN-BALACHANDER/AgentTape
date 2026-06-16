@@ -38,7 +38,7 @@ class SchemaVersionError(AgentTapeError):
 class FieldDiff:
     """A single field-level difference between an incoming and a recorded request."""
 
-    __slots__ = ("path", "expected", "received")
+    __slots__ = ("expected", "path", "received")
 
     def __init__(self, path: str, expected: Any, received: Any) -> None:
         self.path = path

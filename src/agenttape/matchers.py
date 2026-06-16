@@ -18,7 +18,8 @@ Built-in matchers:
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, Protocol, runtime_checkable
+from collections.abc import Callable, Iterable
+from typing import Protocol, runtime_checkable
 
 from .canonical import DEFAULT_VOLATILE_FIELDS, compute_match_key
 
@@ -122,15 +123,15 @@ def is_ordered(matcher: Matcher) -> bool:
 
 __all__ = [
     "DEFAULT_VOLATILE_FIELDS",
-    "Matcher",
-    "MatcherSpec",
+    "ORDERED_SENTINEL",
+    "CustomMatcher",
     "ExactMatcher",
     "IgnoreVolatileMatcher",
+    "Matcher",
+    "MatcherSpec",
     "OrderedMatcher",
     "SemanticStubMatcher",
-    "CustomMatcher",
+    "is_ordered",
     "resolve_matcher",
     "resolve_matchers",
-    "is_ordered",
-    "ORDERED_SENTINEL",
 ]

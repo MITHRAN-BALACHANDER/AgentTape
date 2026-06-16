@@ -10,8 +10,9 @@ recording raises :class:`UnmatchedInteractionError`.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import Any
 
 from .canonical import canonicalize
 from .errors import FieldDiff, UnmatchedInteractionError
@@ -81,6 +82,11 @@ class Engine:
         self.executed: list[Interaction] = []
         # The full served timeline (replayed + executed), in call order.
         self.timeline: list[Interaction] = []
+        # Re-entrancy depth: while an executor runs we are "inside" a boundary, so a
+        # nested interception (e.g. the httpx fallback firing during an OpenAI call
+        # the openai adapter already wrapped) passes through instead of double
+        # recording. The outermost boundary is the one captured.
+        self._depth = 0
         # Per-kind ordinal counter for ordered matching context.
         self._ordinal: dict[tuple[str, str], int] = {}
 
@@ -105,6 +111,9 @@ class Engine:
         """
 
         boundary = boundary or kind
+        if self._depth > 0:
+            # Nested inside another boundary's real execution: pass through.
+            return executor() if executor is not None else None
         live = self._is_live(kind, boundary)
         match_key = self._key_for(request)
 
@@ -124,6 +133,87 @@ class Engine:
         return self._execute_and_record(
             kind, request, boundary, executor, match_key, usage=usage, tags=tags
         )
+
+    async def aintercept(
+        self,
+        kind: str,
+        request: dict[str, Any],
+        *,
+        boundary: str | None = None,
+        executor: Callable[[], Any] | None = None,
+        usage: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> Any:
+        """Async counterpart to :meth:`intercept` for coroutine boundaries."""
+
+        boundary = boundary or kind
+        if self._depth > 0:
+            return await executor() if executor is not None else None
+        live = self._is_live(kind, boundary)
+        match_key = self._key_for(request)
+
+        if not live and self.flags.replay_existing:
+            slot = self._find_match(kind, boundary, match_key)
+            if slot is not None:
+                slot.consumed = True
+                self.timeline.append(slot.interaction)
+                return self._reconstruct(slot.interaction)
+            if not self.flags.record_new:
+                raise self._unmatched(kind, boundary, request, match_key)
+
+        if executor is None:
+            raise self._unmatched(kind, boundary, request, match_key)
+        return await self._aexecute_and_record(
+            kind, request, boundary, executor, match_key, usage=usage, tags=tags
+        )
+
+    async def _aexecute_and_record(
+        self,
+        kind: str,
+        request: dict[str, Any],
+        boundary: str,
+        executor: Callable[[], Any],
+        match_key: str,
+        *,
+        usage: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> Any:
+        start = time.perf_counter()
+        self._depth += 1
+        try:
+            response = await executor()
+        except BaseException as exc:
+            self._depth -= 1
+            latency = (time.perf_counter() - start) * 1000.0
+            interaction = Interaction(
+                index=0,
+                kind=kind,
+                request=request,
+                error=_serialize_exception(exc),
+                match_key=match_key,
+                latency_ms=round(latency, 3),
+                boundary=boundary,
+                tags=tags or [],
+            )
+            self.executed.append(interaction)
+            self.timeline.append(interaction)
+            raise
+        self._depth -= 1
+        latency = (time.perf_counter() - start) * 1000.0
+        interaction = Interaction(
+            index=0,
+            kind=kind,
+            request=request,
+            response=_to_jsonable(response),
+            match_key=match_key,
+            latency_ms=round(latency, 3),
+            usage=usage,
+            boundary=boundary,
+            tags=tags or [],
+        )
+        self.executed.append(interaction)
+        self.timeline.append(interaction)
+        return response
 
     # -- output ------------------------------------------------------------ #
 
@@ -216,9 +306,11 @@ class Engine:
         start = time.perf_counter()  # perf_counter is never frozen
         error: dict[str, Any] | None = None
         response: Any = None
+        self._depth += 1
         try:
             response = executor()
-        except BaseException as exc:  # noqa: BLE001 - we record then re-raise
+        except BaseException as exc:
+            self._depth -= 1
             error = _serialize_exception(exc)
             latency = (time.perf_counter() - start) * 1000.0
             interaction = Interaction(
@@ -234,6 +326,7 @@ class Engine:
             self.executed.append(interaction)
             self.timeline.append(interaction)
             raise
+        self._depth -= 1
         latency = (time.perf_counter() - start) * 1000.0
         interaction = Interaction(
             index=0,
@@ -279,7 +372,7 @@ class Engine:
     ) -> tuple[Any, list[FieldDiff]]:
         best: Interaction | None = None
         best_diffs: list[FieldDiff] = []
-        best_score = -1
+        best_score = float("-inf")
         for interaction in self.recorded.interactions:
             b = interaction.boundary or interaction.kind
             if interaction.kind != kind or b != boundary:

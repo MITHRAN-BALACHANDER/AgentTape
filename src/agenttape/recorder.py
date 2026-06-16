@@ -11,8 +11,9 @@ from __future__ import annotations
 import functools
 import inspect
 import threading
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, TypeVar
+from typing import Any, TypeVar
 
 from . import cassette as cassette_io
 from .config import Config
@@ -271,10 +272,10 @@ def _package_version() -> str:
 
 __all__ = [
     "Session",
-    "use_cassette",
+    "active_session",
     "record",
     "replay",
-    "active_session",
+    "use_cassette",
 ]
 
 # Re-export for convenience to callers that want the awaitable typing alias.

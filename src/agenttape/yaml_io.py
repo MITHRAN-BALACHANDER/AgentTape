@@ -259,7 +259,10 @@ class _StdlibParser:
             return ([] if stripped == "[]" else {}), idx + 1
         if stripped.startswith(("[", "{")):
             return _parse_flow(stripped), idx + 1
-        return self._parse_mapping(idx, cur_indent)
+        if _looks_like_mapping_entry(stripped):
+            return self._parse_mapping(idx, cur_indent)
+        # A bare top-level scalar document (e.g. ".nan", "42", "hello").
+        return _parse_scalar(stripped), idx + 1
 
     def _parse_sequence(self, idx: int, indent: int) -> tuple[list[Any], int]:
         items: list[Any] = []
@@ -300,6 +303,10 @@ class _StdlibParser:
         if block is not None:
             value, idx = self._read_block_scalar(idx + 1, content_indent, block)
             return value, idx
+        if rest == "-" or rest.startswith("- "):
+            # Nested sequence introduced inline after the dash ("- - 1").
+            self._lines[idx] = " " * content_indent + rest
+            return self._parse_sequence(idx, content_indent)
         if _looks_like_mapping_entry(rest):
             # Rewrite the line so the mapping parser sees aligned content.
             self._lines[idx] = " " * content_indent + rest
@@ -375,9 +382,7 @@ class _StdlibParser:
             text = _fold(collected)
         else:  # literal
             text = "\n".join(collected)
-        if chomp == "keep":
-            text += "\n"
-        elif chomp == "clip":
+        if chomp == "keep" or chomp == "clip":
             text += "\n"
         # strip: leave as-is (no trailing newline)
         return text, idx

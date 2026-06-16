@@ -18,7 +18,8 @@ import sys
 import time
 import uuid
 import warnings
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .errors import DeterminismDriftWarning
 
@@ -107,13 +108,14 @@ class FreezeController:
 
     def _freeze_clock(self) -> None:
         if not self.replay:
-            # During recording we capture the base time but keep the real clock so
-            # latency measurements stay accurate.
+            # Recording: pin the clock to "now" and record that base. We still freeze
+            # during record so the agent observes the *same* clock value it will see
+            # on replay (cross-run determinism). Latency stays accurate because it is
+            # measured with time.perf_counter, which is never patched.
             self._base_time = _REAL_TIME()
             self._base_iso = _REAL_DATETIME.fromtimestamp(
                 self._base_time, _dt.timezone.utc
             ).isoformat()
-            return
 
         base = self._base_time
 

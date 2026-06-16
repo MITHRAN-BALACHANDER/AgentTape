@@ -1,0 +1,238 @@
+"""OpenAI adapter — the primary, fully-built adapter.
+
+Patches ``chat.completions.create`` and ``responses.create`` (sync + async) on the
+OpenAI Python SDK so each LLM call is recorded/replayed as an ``llm`` interaction.
+
+* The request is the model + messages + tool schema + sampling params.
+* The response is recorded via the SDK object's ``model_dump()``.
+* On replay the recorded dict is rehydrated back into a real SDK object when the
+  SDK is importable, or into an attribute-accessible :class:`~agenttape._box.Box`
+  otherwise — so replay works fully offline even without ``openai`` installed.
+
+Streaming responses are passed through untouched (not deterministically
+recordable); everything else is captured.
+"""
+
+from __future__ import annotations
+
+import functools
+from collections.abc import Callable
+from typing import Any
+
+from .._box import box
+from ..recorder import active_session
+from .base import Adapter, RefCountedPatch
+
+# Request kwargs that are transport/volatile rather than semantic.
+_DROP_KEYS = frozenset(
+    {"stream", "timeout", "extra_headers", "extra_query", "extra_body", "stream_options"}
+)
+
+
+def _build_request(kind: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    request: dict[str, Any] = {"endpoint": kind}
+    for key, value in kwargs.items():
+        if key in _DROP_KEYS or value is None:
+            continue
+        request[key] = value
+    return request
+
+
+def _dump(resp: Any) -> Any:
+    if hasattr(resp, "model_dump"):
+        try:
+            return resp.model_dump()
+        except Exception:  # pragma: no cover - defensive
+            pass
+    if isinstance(resp, dict):
+        return resp
+    return resp
+
+
+def _rehydrate_chat(data: Any) -> Any:
+    try:
+        from openai.types.chat import ChatCompletion
+
+        return ChatCompletion.model_validate(data)
+    except Exception:
+        return box(data)
+
+
+def _rehydrate_response(data: Any) -> Any:
+    try:
+        from openai.types.responses import Response
+
+        return Response.model_validate(data)
+    except Exception:
+        return box(data)
+
+
+def _extract_usage(result: Any) -> dict[str, Any] | None:
+    usage = None
+    if isinstance(result, dict):
+        usage = result.get("usage")
+    else:
+        usage = getattr(result, "usage", None)
+    if usage is None:
+        return None
+    if hasattr(usage, "model_dump"):
+        try:
+            return usage.model_dump()
+        except Exception:  # pragma: no cover
+            return None
+    if isinstance(usage, dict):
+        return usage
+    return None
+
+
+def _route(
+    orig: Callable[..., Any],
+    self_obj: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    kind: str,
+    rehydrate: Callable[[Any], Any],
+) -> Any:
+    session = active_session()
+    if session is None or kwargs.get("stream"):
+        return orig(self_obj, *args, **kwargs)
+    session.set_meta(framework="openai", model=kwargs.get("model"))
+    request = _build_request(kind, kwargs)
+
+    def executor() -> Any:
+        return _dump(orig(self_obj, *args, **kwargs))
+
+    result = session.engine.intercept("llm", request, boundary="llm", executor=executor)
+    obj = rehydrate(result) if isinstance(result, dict) else result
+    _stamp_usage(session, obj)
+    return obj
+
+
+async def _aroute(
+    orig: Callable[..., Any],
+    self_obj: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    kind: str,
+    rehydrate: Callable[[Any], Any],
+) -> Any:
+    session = active_session()
+    if session is None or kwargs.get("stream"):
+        return await orig(self_obj, *args, **kwargs)
+    session.set_meta(framework="openai", model=kwargs.get("model"))
+    request = _build_request(kind, kwargs)
+
+    async def executor() -> Any:
+        return _dump(await orig(self_obj, *args, **kwargs))
+
+    result = await session.engine.aintercept(
+        "llm", request, boundary="llm", executor=executor
+    )
+    obj = rehydrate(result) if isinstance(result, dict) else result
+    _stamp_usage(session, obj)
+    return obj
+
+
+def _stamp_usage(session: Any, obj: Any) -> None:
+    if session.engine.timeline:
+        inter = session.engine.timeline[-1]
+        if inter.usage is None:
+            inter.usage = _extract_usage(obj)
+
+
+class OpenAIAdapter(Adapter):
+    name = "openai"
+
+    def __init__(self) -> None:
+        self._patch = RefCountedPatch()
+
+    def available(self) -> bool:
+        try:
+            import openai  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def install(self, session: Any) -> None:
+        self._patch.acquire(self._do_install)
+
+    def uninstall(self) -> None:
+        self._patch.release()
+
+    def _do_install(self) -> list[Callable[[], None]]:
+        restores: list[Callable[[], None]] = []
+        restores += self._patch_target(
+            "openai.resources.chat.completions",
+            ["Completions", "AsyncCompletions"],
+            kind="chat.completions",
+            rehydrate=_rehydrate_chat,
+        )
+        restores += self._patch_target(
+            "openai.resources.responses",
+            ["Responses", "AsyncResponses"],
+            kind="responses",
+            rehydrate=_rehydrate_response,
+        )
+        return restores
+
+    def _patch_target(
+        self,
+        module_path: str,
+        class_names: list[str],
+        *,
+        kind: str,
+        rehydrate: Callable[[Any], Any],
+    ) -> list[Callable[[], None]]:
+        restores: list[Callable[[], None]] = []
+        try:
+            module = __import__(module_path, fromlist=class_names)
+        except Exception:
+            return restores
+        for class_name in class_names:
+            cls = getattr(module, class_name, None)
+            if cls is None or not hasattr(cls, "create"):
+                continue
+            original = cls.create
+            is_async = class_name.startswith("Async")
+            if is_async:
+
+                @functools.wraps(original)
+                async def wrapper(  # type: ignore[misc]
+                    self_obj: Any,
+                    *args: Any,
+                    __orig: Callable[..., Any] = original,
+                    __kind: str = kind,
+                    __rehydrate: Callable[[Any], Any] = rehydrate,
+                    **kwargs: Any,
+                ) -> Any:
+                    return await _aroute(
+                        __orig, self_obj, args, kwargs, kind=__kind, rehydrate=__rehydrate
+                    )
+
+            else:
+
+                @functools.wraps(original)
+                def wrapper(  # type: ignore[misc]
+                    self_obj: Any,
+                    *args: Any,
+                    __orig: Callable[..., Any] = original,
+                    __kind: str = kind,
+                    __rehydrate: Callable[[Any], Any] = rehydrate,
+                    **kwargs: Any,
+                ) -> Any:
+                    return _route(
+                        __orig, self_obj, args, kwargs, kind=__kind, rehydrate=__rehydrate
+                    )
+
+            cls.create = wrapper  # type: ignore[method-assign]
+            restores.append(_restorer(cls, "create", original))
+        return restores
+
+
+def _restorer(cls: Any, name: str, original: Any) -> Callable[[], None]:
+    def restore() -> None:
+        setattr(cls, name, original)
+
+    return restore
