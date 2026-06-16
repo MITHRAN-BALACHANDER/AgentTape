@@ -49,9 +49,7 @@ def test_redaction_email_toggle() -> None:
 
 
 def test_redaction_extra_rules() -> None:
-    cfg = RedactionConfig.from_mapping(
-        {"denylist": ["x-custom"], "regexes": [r"ID-\d+"]}
-    )
+    cfg = RedactionConfig.from_mapping({"denylist": ["x-custom"], "regexes": [r"ID-\d+"]})
     r = Redactor(cfg)
     out = r.redact({"x-custom": "secret", "note": "see ID-42 today"})
     assert out["x-custom"] == "***REDACTED***"

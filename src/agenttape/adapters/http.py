@@ -120,9 +120,7 @@ class HttpxAdapter(Adapter):
                 resp.read()
                 return _httpx_dump(resp)
 
-            recorded = session.engine.intercept(
-                "http", req, boundary=boundary, executor=executor
-            )
+            recorded = session.engine.intercept("http", req, boundary=boundary, executor=executor)
             return _httpx_build(httpx, recorded, request)
 
         @functools.wraps(orig_async)
@@ -219,9 +217,7 @@ class RequestsAdapter(Adapter):
                 resp = orig_send(adapter, request, **kwargs)
                 return _requests_dump(resp)
 
-            recorded = session.engine.intercept(
-                "http", req, boundary=boundary, executor=executor
-            )
+            recorded = session.engine.intercept("http", req, boundary=boundary, executor=executor)
             return _requests_build(requests, recorded, request)
 
         HTTPAdapter.send = send  # type: ignore[method-assign]

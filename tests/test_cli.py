@@ -26,7 +26,14 @@ def _make(path: Path, content: str = "hello") -> None:
                 usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 latency_ms=10.0,
             ),
-            Interaction(index=1, kind="tool", boundary="save", request={"name": "save"}, response={"ok": True}, latency_ms=2.0),
+            Interaction(
+                index=1,
+                kind="tool",
+                boundary="save",
+                request={"name": "save"},
+                response={"ok": True},
+                latency_ms=2.0,
+            ),
         ],
     )
     cio.write_cassette(c, path)
@@ -41,7 +48,9 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+def test_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
     monkeypatch.chdir(tmp_path)
     assert main(["init"]) == 0
     assert (tmp_path / "agenttape.toml").exists()
@@ -100,7 +109,13 @@ def test_view_diff(project: Path) -> None:
 
 def test_redact(project: Path) -> None:
     path = project / "cassettes" / "secret.yaml"
-    c = Cassette(interactions=[Interaction(index=0, kind="tool", request={}, response={"k": "sk-ABCDEFGHIJKLMNOPQRSTUVWX12"})])
+    c = Cassette(
+        interactions=[
+            Interaction(
+                index=0, kind="tool", request={}, response={"k": "sk-ABCDEFGHIJKLMNOPQRSTUVWX12"}
+            )
+        ]
+    )
     from agenttape import yaml_io
 
     path.write_text(yaml_io.dump(c.to_dict()), encoding="utf-8")

@@ -63,9 +63,7 @@ def _externalize(obj: Any, threshold: int, writes: dict[str, bytes]) -> Any:
     return obj
 
 
-def _make_ref(
-    data: bytes, encoding: str, preview: str, writes: dict[str, bytes]
-) -> dict[str, Any]:
+def _make_ref(data: bytes, encoding: str, preview: str, writes: dict[str, bytes]) -> dict[str, Any]:
     digest = content_hash(data)
     name = digest.replace("sha256:", "sha256-")
     writes[name] = data

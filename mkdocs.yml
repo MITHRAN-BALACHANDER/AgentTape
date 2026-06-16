@@ -1,0 +1,60 @@
+site_name: AgentTape
+site_description: VCR.py for AI agents — deterministic record/replay of LLM and tool calls.
+site_url: https://MITHRAN-BALACHANDER.github.io/agenttape/
+repo_url: https://github.com/MITHRAN-BALACHANDER/AgentTape
+repo_name: MITHRAN-BALACHANDER/AgentTape
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Guides:
+      - Mixed / partial replay: mixed-replay.md
+      - Determinism: determinism.md
+      - Replay with changes: replay-with-changes.md
+      - Redaction & secrets: redaction.md
+  - Reference:
+      - Cassette format: format.md
+      - Configuration: configuration.md
+      - CLI: cli.md
+      - pytest plugin: pytest.md
+  - Extending:
+      - Writing an adapter: adapters.md
+  - Cookbook: cookbook.md

@@ -14,7 +14,9 @@ from typing import Any
 from .schema import Cassette
 
 
-def render_html(cassette: Cassette, *, title: str = "AgentTape", second: Cassette | None = None) -> str:
+def render_html(
+    cassette: Cassette, *, title: str = "AgentTape", second: Cassette | None = None
+) -> str:
     payload: dict[str, Any] = {
         "primary": cassette.to_dict(),
         "secondary": second.to_dict() if second is not None else None,
@@ -36,11 +38,7 @@ def write_html(
 
 
 def _escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 _TEMPLATE = """<!DOCTYPE html>

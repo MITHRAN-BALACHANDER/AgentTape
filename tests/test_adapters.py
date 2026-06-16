@@ -38,9 +38,13 @@ def test_openai_secret_redacted(openai_client_factory: Any, cassette_dir: Path) 
 
     def agent() -> str:
         client = factory()
-        return client.chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}]
-        ).choices[0].message.content
+        return (
+            client.chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}]
+            )
+            .choices[0]
+            .message.content
+        )
 
     with use_cassette("sec", mode="record", cassette_dir=cassette_dir):
         agent()
@@ -69,14 +73,21 @@ def test_openai_hand_edit_reflected(openai_client_factory: Any, cassette_dir: Pa
     factory, counter = openai_client_factory
 
     def agent() -> str:
-        return factory("original").chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}]
-        ).choices[0].message.content
+        return (
+            factory("original")
+            .chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}]
+            )
+            .choices[0]
+            .message.content
+        )
 
     with use_cassette("edit", mode="record", cassette_dir=cassette_dir):
         agent()
     path = cassette_dir / "edit.yaml"
-    path.write_text(path.read_text(encoding="utf-8").replace("original", "EDITED"), encoding="utf-8")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("original", "EDITED"), encoding="utf-8"
+    )
     calls_before = counter["calls"]
     with use_cassette("edit", mode="none", cassette_dir=cassette_dir):
         assert agent() == "EDITED"
@@ -93,9 +104,14 @@ def test_openai_mixed_replay(openai_client_factory: Any, cassette_dir: Path) -> 
         return {"saved": x}
 
     def agent(prompt: str) -> str:
-        out = factory("answer").chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}]
-        ).choices[0].message.content
+        out = (
+            factory("answer")
+            .chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}]
+            )
+            .choices[0]
+            .message.content
+        )
         save("row")
         return out
 
@@ -107,6 +123,24 @@ def test_openai_mixed_replay(openai_client_factory: Any, cassette_dir: Path) -> 
     assert counter["calls"] == net0 + 1  # llm ran live
     assert db["writes"] == db0  # tool stayed frozen
     assert (cassette_dir / "mx.derived.yaml").exists()
+
+
+def test_openai_model_override(openai_client_factory: Any, cassette_dir: Path) -> None:
+    from agenttape.config import Config
+
+    factory, _ = openai_client_factory
+    cfg = Config(cassette_dir=cassette_dir, model_override="gpt-4o")
+
+    def agent() -> None:
+        factory("answer").chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}]
+        )
+
+    with use_cassette("ov", mode="record", config=cfg):
+        agent()
+    c = cio.read_cassette(cassette_dir / "ov.yaml")
+    # The real call and the recorded request use the overridden model.
+    assert c.interactions[0].request["model"] == "gpt-4o"
 
 
 # -- raw httpx / requests fallback ----------------------------------------- #
@@ -144,8 +178,6 @@ def test_requests_fallback_manual(cassette_dir: Path, monkeypatch: pytest.Monkey
     # Patch the *original* HTTPAdapter.send via a low-level stub so no real network
     # is used while still exercising AgentTape's requests patch on top.
     from requests.adapters import HTTPAdapter
-
-    real_send = HTTPAdapter.send
 
     def fake_send(self: Any, request: Any, **kwargs: Any) -> Any:
         counter["n"] += 1

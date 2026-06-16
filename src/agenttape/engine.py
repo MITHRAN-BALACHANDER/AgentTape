@@ -259,14 +259,18 @@ class Engine:
             if matcher is not None and not is_ordered(matcher):
                 key = matcher.key(interaction.request, self.ignore_fields)
             else:
-                key = interaction.match_key or matcher.key(interaction.request, self.ignore_fields) if matcher else interaction.match_key
+                key = (
+                    interaction.match_key or matcher.key(interaction.request, self.ignore_fields)
+                    if matcher
+                    else interaction.match_key
+                )
             slot = _RecordedSlot(interaction)
             index.setdefault((interaction.kind, boundary, key), []).append(slot)
             # Also index by stored match_key so hand-written keys still resolve.
             if interaction.match_key and interaction.match_key != key:
-                index.setdefault(
-                    (interaction.kind, boundary, interaction.match_key), []
-                ).append(slot)
+                index.setdefault((interaction.kind, boundary, interaction.match_key), []).append(
+                    slot
+                )
         return index
 
     def _find_match(self, kind: str, boundary: str, key: str) -> _RecordedSlot | None:
@@ -278,9 +282,9 @@ class Engine:
                     if not slot.consumed:
                         return slot
             return None
-        slots = self._index.get((kind, boundary, key))
-        if slots:
-            for slot in slots:
+        keyed = self._index.get((kind, boundary, key))
+        if keyed:
+            for slot in keyed:
                 if not slot.consumed:
                     return slot
         return None
@@ -367,9 +371,7 @@ class Engine:
             boundary_name=boundary,
         )
 
-    def _closest(
-        self, kind: str, boundary: str, canonical: Any
-    ) -> tuple[Any, list[FieldDiff]]:
+    def _closest(self, kind: str, boundary: str, canonical: Any) -> tuple[Any, list[FieldDiff]]:
         best: Interaction | None = None
         best_diffs: list[FieldDiff] = []
         best_score = float("-inf")
@@ -428,11 +430,7 @@ def _to_jsonable(obj: Any) -> Any:
         except Exception:  # pragma: no cover
             pass
     if hasattr(obj, "__dict__"):
-        return {
-            str(k): _to_jsonable(v)
-            for k, v in vars(obj).items()
-            if not k.startswith("_")
-        }
+        return {str(k): _to_jsonable(v) for k, v in vars(obj).items() if not k.startswith("_")}
     return str(obj)
 
 

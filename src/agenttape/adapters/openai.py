@@ -68,16 +68,12 @@ def _rehydrate_response(data: Any) -> Any:
 
 
 def _extract_usage(result: Any) -> dict[str, Any] | None:
-    usage = None
-    if isinstance(result, dict):
-        usage = result.get("usage")
-    else:
-        usage = getattr(result, "usage", None)
+    usage = result.get("usage") if isinstance(result, dict) else getattr(result, "usage", None)
     if usage is None:
         return None
     if hasattr(usage, "model_dump"):
         try:
-            return usage.model_dump()
+            return dict(usage.model_dump())
         except Exception:  # pragma: no cover
             return None
     if isinstance(usage, dict):
@@ -97,6 +93,7 @@ def _route(
     session = active_session()
     if session is None or kwargs.get("stream"):
         return orig(self_obj, *args, **kwargs)
+    kwargs = _apply_model_override(session, kwargs)
     session.set_meta(framework="openai", model=kwargs.get("model"))
     request = _build_request(kind, kwargs)
 
@@ -121,18 +118,30 @@ async def _aroute(
     session = active_session()
     if session is None or kwargs.get("stream"):
         return await orig(self_obj, *args, **kwargs)
+    kwargs = _apply_model_override(session, kwargs)
     session.set_meta(framework="openai", model=kwargs.get("model"))
     request = _build_request(kind, kwargs)
 
     async def executor() -> Any:
         return _dump(await orig(self_obj, *args, **kwargs))
 
-    result = await session.engine.aintercept(
-        "llm", request, boundary="llm", executor=executor
-    )
+    result = await session.engine.aintercept("llm", request, boundary="llm", executor=executor)
     obj = rehydrate(result) if isinstance(result, dict) else result
     _stamp_usage(session, obj)
     return obj
+
+
+def _apply_model_override(session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``model_override`` from config for replay-with-different-model runs.
+
+    This genuinely changes the model sent to the API (a real re-execution, not
+    deterministic replay), consistent with the honest framing in the docs.
+    """
+
+    override = getattr(session.config, "model_override", None)
+    if override and "model" in kwargs and kwargs["model"] != override:
+        return {**kwargs, "model": override}
+    return kwargs
 
 
 def _stamp_usage(session: Any, obj: Any) -> None:
@@ -198,8 +207,8 @@ class OpenAIAdapter(Adapter):
             is_async = class_name.startswith("Async")
             if is_async:
 
-                @functools.wraps(original)
-                async def wrapper(  # type: ignore[misc]
+                @functools.wraps(original)  # type: ignore
+                async def wrapper(  # type: ignore
                     self_obj: Any,
                     *args: Any,
                     __orig: Callable[..., Any] = original,
@@ -213,8 +222,8 @@ class OpenAIAdapter(Adapter):
 
             else:
 
-                @functools.wraps(original)
-                def wrapper(  # type: ignore[misc]
+                @functools.wraps(original)  # type: ignore
+                def wrapper(  # type: ignore
                     self_obj: Any,
                     *args: Any,
                     __orig: Callable[..., Any] = original,

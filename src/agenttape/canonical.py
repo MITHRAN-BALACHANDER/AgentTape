@@ -105,9 +105,7 @@ def compute_match_key(
 ) -> str:
     """Return the ``sha256:...`` match key for a request structure."""
 
-    canon = canonicalize(
-        obj, ignore_fields, normalize_whitespace=normalize_whitespace
-    )
+    canon = canonicalize(obj, ignore_fields, normalize_whitespace=normalize_whitespace)
     digest = hashlib.sha256(stable_json(canon).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 

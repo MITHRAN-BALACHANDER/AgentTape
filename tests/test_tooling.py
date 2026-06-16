@@ -30,7 +30,11 @@ def _sample() -> Cassette:
                 latency_ms=120.0,
             ),
             Interaction(
-                index=1, kind="tool", boundary="save", request={"name": "save"}, response={"ok": True},
+                index=1,
+                kind="tool",
+                boundary="save",
+                request={"name": "save"},
+                response={"ok": True},
                 latency_ms=5.0,
             ),
         ],

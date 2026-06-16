@@ -64,8 +64,8 @@ class LangGraphAdapter(Adapter):
             if original is None:
                 continue
 
-            @functools.wraps(original)
-            def wrapper(
+            @functools.wraps(original)  # type: ignore
+            def wrapper(  # type: ignore
                 self_obj: Any,
                 *args: Any,
                 __orig: Callable[..., Any] = original,

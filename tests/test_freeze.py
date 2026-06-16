@@ -101,11 +101,10 @@ def test_env_drift_warning(cassette_dir: Path, monkeypatch: pytest.MonkeyPatch) 
     assert any(issubclass(w.category, DeterminismDriftWarning) for w in caught)
 
 
-def test_freeze_restores_after_session() -> None:
+def test_freeze_restores_after_session(cassette_dir: Path) -> None:
     real_uuid = uuid.uuid4
     real_time = time.time
-    cdir = Path(".")
-    with use_cassette("restore", mode="record", cassette_dir=cdir / "_t"):
+    with use_cassette("restore", mode="record", cassette_dir=cassette_dir):
         pass
     assert uuid.uuid4 is real_uuid
     assert time.time is real_time

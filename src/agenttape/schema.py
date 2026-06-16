@@ -17,9 +17,7 @@ SCHEMA_VERSION = "1"
 SUPPORTED_VERSIONS = frozenset({"1"})
 
 # The boundary kinds we record. ``http`` is the always-on fallback layer.
-KINDS = frozenset(
-    {"llm", "tool", "retrieval", "memory_read", "memory_write", "http"}
-)
+KINDS = frozenset({"llm", "tool", "retrieval", "memory_read", "memory_write", "http"})
 
 
 @dataclass
@@ -43,8 +41,7 @@ class Interaction:
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise CassetteCorruptError(
-                f"Unknown interaction kind {self.kind!r}; expected one of "
-                f"{sorted(KINDS)}."
+                f"Unknown interaction kind {self.kind!r}; expected one of {sorted(KINDS)}."
             )
 
     def to_dict(self) -> dict[str, Any]:

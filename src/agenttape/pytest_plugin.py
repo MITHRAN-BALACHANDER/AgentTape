@@ -56,8 +56,8 @@ def _resolve_mode(config: Any, marker_kwargs: dict[str, Any]) -> str:
         return "all"
     cli_mode = config.getoption("--agenttape-mode")
     if cli_mode:
-        return cli_mode
-    return marker_kwargs.get("mode", "none")
+        return str(cli_mode)
+    return str(marker_kwargs.get("mode", "none"))
 
 
 def _cassette_name(marker: Any, node_name: str) -> str:
@@ -121,9 +121,7 @@ class CassetteHandle:
         from .schema import Cassette
 
         recorded = self.session.recorded
-        current = Cassette(
-            meta=recorded.meta, interactions=list(self.session.engine.timeline)
-        )
+        current = Cassette(meta=recorded.meta, interactions=list(self.session.engine.timeline))
         diff = run_diff(recorded, current)
         assert not diff.changed, "run drifted from recorded snapshot:\n" + diff.render()
 

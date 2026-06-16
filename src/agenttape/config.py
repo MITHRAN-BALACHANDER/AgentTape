@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .canonical import DEFAULT_VOLATILE_FIELDS
 from .errors import ConfigError
@@ -75,9 +75,7 @@ class Config:
         mode = data.get("default_mode")
         if mode is not None:
             if mode not in VALID_MODES:
-                raise ConfigError(
-                    f"default_mode={mode!r} is invalid; choose one of {VALID_MODES}."
-                )
+                raise ConfigError(f"default_mode={mode!r} is invalid; choose one of {VALID_MODES}.")
             cfg.default_mode = mode
 
         if "default_matchers" in data:
@@ -125,13 +123,13 @@ def _load_toml(path: Path) -> dict[str, Any]:
     try:
         import tomllib
 
-        return tomllib.loads(raw.decode("utf-8"))
+        return cast("dict[str, Any]", tomllib.loads(raw.decode("utf-8")))
     except ModuleNotFoundError:
         pass
     try:
         import tomli
 
-        return tomli.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
+        return cast("dict[str, Any]", tomli.loads(raw.decode("utf-8")))
     except ModuleNotFoundError:
         pass
     return _MiniToml(raw.decode("utf-8")).parse()

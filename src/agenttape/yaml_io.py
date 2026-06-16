@@ -290,9 +290,7 @@ class _StdlibParser:
                 # The dash introduces an element that may itself be a mapping or
                 # scalar. Compute the effective indent of the inlined content.
                 content_indent = indent + (len(stripped) - len(rest))
-                value, idx = self._parse_inline_after_dash(
-                    idx, indent, content_indent, rest
-                )
+                value, idx = self._parse_inline_after_dash(idx, indent, content_indent, rest)
                 items.append(value)
         return items, idx
 
@@ -378,10 +376,7 @@ class _StdlibParser:
         # Trim trailing blank lines that belong to the next node.
         while collected and collected[-1] == "":
             collected.pop()
-        if style == ">":  # folded
-            text = _fold(collected)
-        else:  # literal
-            text = "\n".join(collected)
+        text = _fold(collected) if style == ">" else "\n".join(collected)
         if chomp == "keep" or chomp == "clip":
             text += "\n"
         # strip: leave as-is (no trailing newline)
@@ -452,7 +447,7 @@ def _detect_block_scalar(token: str) -> tuple[str, str] | None:
 
 
 def _looks_like_mapping_entry(token: str) -> bool:
-    key, sep, _ = _split_key(token)
+    _key, sep, _ = _split_key(token)
     return sep
 
 
@@ -513,9 +508,8 @@ def _strip_inline_comment(token: str) -> str:
             in_single = not in_single
         elif ch == '"' and not in_single:
             in_double = not in_double
-        elif ch == "#" and not in_single and not in_double:
-            if i == 0 or token[i - 1] == " ":
-                return token[:i]
+        elif ch == "#" and not in_single and not in_double and (i == 0 or token[i - 1] == " "):
+            return token[:i]
     return token
 
 
@@ -529,10 +523,7 @@ def _unquote_single(token: str) -> str:
 
 def _unquote_double(token: str) -> str:
     token = token.strip()
-    if len(token) >= 2 and token.endswith('"'):
-        inner = token[1:-1]
-    else:
-        inner = token[1:]
+    inner = token[1:-1] if len(token) >= 2 and token.endswith('"') else token[1:]
     return _decode_escapes(inner)
 
 

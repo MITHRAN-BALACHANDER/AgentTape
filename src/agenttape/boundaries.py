@@ -42,9 +42,7 @@ def _normalize_args(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[
 
 
 def _make_boundary(kind: str) -> Callable[..., Any]:
-    def factory(
-        fn: F | None = None, *, name: str | None = None
-    ) -> Any:
+    def factory(fn: F | None = None, *, name: str | None = None) -> Any:
         def decorate(f: F) -> F:
             boundary_name = name or getattr(f, "__name__", kind)
 

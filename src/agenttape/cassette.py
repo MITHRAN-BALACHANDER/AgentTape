@@ -89,10 +89,7 @@ def read_cassette(path: Path) -> Cassette:
     text = path.read_text(encoding="utf-8")
     fmt = detect_format(path)
     try:
-        if fmt == "json":
-            data = json.loads(text)
-        else:
-            data = yaml_io.load(text)
+        data = json.loads(text) if fmt == "json" else yaml_io.load(text)
     except Exception as exc:
         raise CassetteCorruptError(
             f"Could not parse cassette {path}: {exc}. The file may be corrupt or "
@@ -118,7 +115,7 @@ def load_raw(path: Path) -> dict[str, Any]:
     path = Path(path)
     text = path.read_text(encoding="utf-8")
     fmt = detect_format(path)
-    data = json.loads(text) if fmt == "json" else yaml_io.load(text)
+    data: Any = json.loads(text) if fmt == "json" else yaml_io.load(text)
     if not isinstance(data, dict):
         raise CassetteCorruptError(f"Cassette {path} root must be a mapping.")
     return data

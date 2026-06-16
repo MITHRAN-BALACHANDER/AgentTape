@@ -39,7 +39,7 @@ try:  # populated from package metadata when installed
 except Exception:  # pragma: no cover - editable/source tree fallback
     __version__ = "0.1.0"
 
-__all__ = [
+__all__ = [  # noqa: RUF022 - grouped by concern for readability, not alphabetised
     "__version__",
     # Core API
     "use_cassette",

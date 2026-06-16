@@ -29,10 +29,10 @@ class Box(dict):  # type: ignore[type-arg]
         return super().__iter__()
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return _unwrap(self)
+        return {k: _unwrap(v) for k, v in self.items()}
 
     def to_dict(self) -> dict[str, Any]:
-        return _unwrap(self)
+        return {k: _unwrap(v) for k, v in self.items()}
 
 
 def _wrap(value: Any) -> Any:

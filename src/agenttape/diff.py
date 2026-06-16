@@ -68,12 +68,8 @@ class RunDiff:
         lines = ["Run diff", "========"]
         lines.append(f"model:   {self.model_a}  ->  {self.model_b}")
         lines.append(f"tokens:  {self.tokens_a}  ->  {self.tokens_b}")
-        lines.append(
-            f"cost:    {_fmt_cost(self.cost_a)}  ->  {_fmt_cost(self.cost_b)}"
-        )
-        lines.append(
-            f"latency: {self.latency_a:.1f}ms  ->  {self.latency_b:.1f}ms"
-        )
+        lines.append(f"cost:    {_fmt_cost(self.cost_a)}  ->  {_fmt_cost(self.cost_b)}")
+        lines.append(f"latency: {self.latency_a:.1f}ms  ->  {self.latency_b:.1f}ms")
         added = sorted(set(self.tool_names_b) - set(self.tool_names_a))
         removed = sorted(set(self.tool_names_a) - set(self.tool_names_b))
         if added:
@@ -98,11 +94,7 @@ def _total_latency(cassette: Cassette) -> float:
 
 
 def _tool_names(cassette: Cassette) -> list[str]:
-    return [
-        i.boundary or i.kind
-        for i in cassette.interactions
-        if i.kind in ("tool", "retrieval")
-    ]
+    return [i.boundary or i.kind for i in cassette.interactions if i.kind in ("tool", "retrieval")]
 
 
 def run_diff(a: Cassette, b: Cassette) -> RunDiff:
@@ -282,7 +274,7 @@ class OutputDiff:
 
     @property
     def changed(self) -> bool:
-        return self.output_a != self.output_b
+        return bool(self.output_a != self.output_b)
 
     def render(self) -> str:
         if not self.changed:

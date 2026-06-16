@@ -60,7 +60,10 @@ class FreezeController:
         # Clock bookkeeping.
         self._base_time: float = float(self.state.get("base_time", _REAL_TIME()))
         self._base_iso: str = str(
-            self.state.get("base_iso", _REAL_DATETIME.fromtimestamp(self._base_time, _dt.timezone.utc).isoformat())
+            self.state.get(
+                "base_iso",
+                _REAL_DATETIME.fromtimestamp(self._base_time, _dt.timezone.utc).isoformat(),
+            )
         )
         self._mono_counter = 0.0
         # Env bookkeeping.
@@ -242,7 +245,7 @@ def _read_env(whitelist: tuple[str, ...]) -> dict[str, str]:
 def _make_frozen_datetime(base: float) -> type:
     frozen_moment = _REAL_DATETIME.fromtimestamp(base, _dt.timezone.utc)
 
-    class FrozenDateTime(_REAL_DATETIME):  # type: ignore[misc, valid-type]
+    class FrozenDateTime(_REAL_DATETIME):
         @classmethod
         def now(cls, tz: Any = None) -> Any:
             if tz is None:
@@ -263,7 +266,7 @@ def _make_frozen_datetime(base: float) -> type:
 def _make_frozen_date(base: float) -> type:
     frozen_day = _REAL_DATETIME.fromtimestamp(base, _dt.timezone.utc).date()
 
-    class FrozenDate(_REAL_DATE):  # type: ignore[misc, valid-type]
+    class FrozenDate(_REAL_DATE):
         @classmethod
         def today(cls) -> Any:
             return frozen_day

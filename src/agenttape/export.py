@@ -54,9 +54,7 @@ def to_otel(cassette: Cassette) -> dict[str, Any]:
                 "kind": "SPAN_KIND_CLIENT",
                 "startTimeUnixNano": str(start),
                 "endTimeUnixNano": str(end),
-                "attributes": [
-                    {"key": k, "value": _attr_value(v)} for k, v in attrs.items()
-                ],
+                "attributes": [{"key": k, "value": _attr_value(v)} for k, v in attrs.items()],
                 "status": {"code": "STATUS_CODE_ERROR" if interaction.error else "STATUS_CODE_OK"},
             }
         )

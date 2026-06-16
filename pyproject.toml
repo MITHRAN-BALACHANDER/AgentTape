@@ -108,7 +108,9 @@ disallow_untyped_defs = true
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-# Optional adapter deps are not present in the strict core type-check environment.
+# Optional adapter deps are typed when installed but absent in the strict core
+# type-check environment. Skipping their imports makes them Any consistently, so the
+# dynamic monkeypatching in adapters type-checks the same with or without them.
 [[tool.mypy.overrides]]
 module = [
     "yaml",
@@ -119,10 +121,23 @@ module = [
     "langgraph.*",
     "httpx",
     "requests",
-    "pytest",
-    "_pytest.*",
+    "requests.*",
+    "tomli",
+    "tomllib",
 ]
 ignore_missing_imports = true
+follow_imports = "skip"
+
+# pytest is typed when installed (dev extra); only stub it out if entirely absent.
+[[tool.mypy.overrides]]
+module = ["pytest", "_pytest.*"]
+ignore_missing_imports = true
+
+# Adapters patch third-party (Any) classes; tolerate ignores that may be redundant
+# depending on whether the optional dependency is installed.
+[[tool.mypy.overrides]]
+module = ["agenttape.adapters.*"]
+warn_unused_ignores = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

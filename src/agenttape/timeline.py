@@ -31,12 +31,12 @@ def render_timeline(cassette: Cassette, path: str | None = None, width: int = 40
     total = sum(latencies) or 1.0
     cursor = 0.0
     lines.append("User")
-    for interaction, lat in zip(cassette.interactions, latencies):
+    for interaction, lat in zip(cassette.interactions, latencies, strict=False):
         lane = _KIND_LANE.get(interaction.kind, interaction.kind)
         name = interaction.boundary or interaction.kind
         start_frac = cursor / total
-        bar_len = max(1, int(round((lat / total) * width)))
-        pad = int(round(start_frac * width))
+        bar_len = max(1, round((lat / total) * width))
+        pad = round(start_frac * width)
         bar = " " * pad + "█" * bar_len
         bar = bar[:width].ljust(width)
         status = "✗" if interaction.error else "→"
@@ -47,8 +47,7 @@ def render_timeline(cassette: Cassette, path: str | None = None, width: int = 40
 
     usage = cassette_usage(cassette)
     lines.append(
-        f"Σ latency {total:.1f}ms · tokens {usage.total_tokens} "
-        f"· cost {_fmt_cost(usage.cost_usd)}"
+        f"Σ latency {total:.1f}ms · tokens {usage.total_tokens} · cost {_fmt_cost(usage.cost_usd)}"
     )
     return "\n".join(lines)
 
@@ -98,7 +97,9 @@ def _render_interaction(interaction: Interaction, *, full: bool) -> str:
     lines = [head]
     lines.append(f"  request:  {_summarize(interaction.request, full)}")
     if interaction.error is not None:
-        lines.append(f"  error:    {interaction.error.get('type')}: {interaction.error.get('message')}")
+        lines.append(
+            f"  error:    {interaction.error.get('type')}: {interaction.error.get('message')}"
+        )
     else:
         lines.append(f"  response: {_summarize(interaction.response, full)}")
     return "\n".join(lines)

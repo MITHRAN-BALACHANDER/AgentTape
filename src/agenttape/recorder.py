@@ -165,6 +165,7 @@ class Session:
             return not self.cassette_existed
         # mode == "none": only when live boundaries produced a derived cassette.
         return self.engine.is_live_session()
+
     def output_path(self) -> Path:
         if self.mode == "none" and self.engine.is_live_session():
             return self.path.with_suffix("").with_name(

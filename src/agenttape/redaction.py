@@ -50,13 +50,13 @@ DEFAULT_DENYLIST_KEYS: tuple[str, ...] = (
 
 # Value patterns redacted wherever they appear inside any string.
 DEFAULT_VALUE_REGEXES: tuple[str, ...] = (
-    r"sk-[A-Za-z0-9_\-]{16,}",          # OpenAI-style secret keys
-    r"sk-proj-[A-Za-z0-9_\-]{16,}",     # OpenAI project keys
-    r"xox[baprs]-[A-Za-z0-9-]{10,}",    # Slack tokens
-    r"gh[pos]_[A-Za-z0-9]{20,}",        # GitHub tokens
-    r"AKIA[0-9A-Z]{16}",                # AWS access key id
-    r"AIza[0-9A-Za-z_\-]{20,}",         # Google API key
-    r"Bearer\s+[A-Za-z0-9._\-]+",       # Bearer tokens
+    r"sk-[A-Za-z0-9_\-]{16,}",  # OpenAI-style secret keys
+    r"sk-proj-[A-Za-z0-9_\-]{16,}",  # OpenAI project keys
+    r"xox[baprs]-[A-Za-z0-9-]{10,}",  # Slack tokens
+    r"gh[pos]_[A-Za-z0-9]{20,}",  # GitHub tokens
+    r"AKIA[0-9A-Z]{16}",  # AWS access key id
+    r"AIza[0-9A-Za-z_\-]{20,}",  # Google API key
+    r"Bearer\s+[A-Za-z0-9._\-]+",  # Bearer tokens
     r"-----BEGIN[A-Z ]+PRIVATE KEY-----[\s\S]+?-----END[A-Z ]+PRIVATE KEY-----",
 )
 

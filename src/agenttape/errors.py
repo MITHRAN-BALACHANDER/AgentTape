@@ -46,7 +46,9 @@ class FieldDiff:
         self.received = received
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
-        return f"FieldDiff(path={self.path!r}, expected={self.expected!r}, received={self.received!r})"
+        return (
+            f"FieldDiff(path={self.path!r}, expected={self.expected!r}, received={self.received!r})"
+        )
 
     def render(self) -> str:
         return f"  - {self.path}: expected {self.expected!r}, received {self.received!r}"
@@ -86,8 +88,7 @@ class UnmatchedInteractionError(AgentTapeError):
         lines: list[str] = []
         target = self.boundary_name or self.kind
         lines.append(
-            f"No recorded {self.kind} interaction matched this incoming request "
-            f"({target})."
+            f"No recorded {self.kind} interaction matched this incoming request ({target})."
         )
         if self.cassette_path:
             lines.append(f"Cassette: {self.cassette_path}")
