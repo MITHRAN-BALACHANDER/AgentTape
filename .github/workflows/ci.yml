@@ -67,4 +67,4 @@ jobs:
       - name: Run core tests forcing the stdlib YAML path
         env:
           AGENTTAPE_FORCE_STDLIB_YAML: "1"
-        run: uv run --no-sync pytest -q tests/test_yaml_io.py tests/test_engine.py tests/test_core_units.py tests/test_freeze.py
+        run: .venv/bin/python -m pytest -q tests/test_yaml_io.py tests/test_engine.py tests/test_core_units.py tests/test_freeze.py
