@@ -21,13 +21,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: uv pip install --system -e ".[dev,openai,http]"
+        run: uv sync --extra dev --extra openai --extra http
       - name: Ruff (lint)
-        run: ruff check src tests
+        run: uv run ruff check src tests
       - name: Ruff (format)
-        run: ruff format --check src tests
+        run: uv run ruff format --check src tests
       - name: Mypy (strict, core)
-        run: mypy
+        run: uv run mypy
 
   test:
     name: Test (py${{ matrix.python-version }} · ${{ matrix.os }})
@@ -44,13 +44,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install --system -e ".[dev,openai,http]"
+        run: uv sync --extra dev --extra openai --extra http
       - name: Run tests with coverage
-        run: coverage run --branch --source=agenttape -m pytest -q
+        run: uv run coverage run --branch --source=agenttape -m pytest -q
       - name: Coverage report
-        run: coverage report
+        run: uv run coverage report
       - name: Enforce core-engine coverage threshold
-        run: coverage report --include="*/agenttape/engine.py" --fail-under=90
+        run: uv run coverage report --include="*/agenttape/engine.py" --fail-under=90
 
   test-zero-deps:
     name: Test core with zero optional deps (stdlib YAML path)
@@ -61,8 +61,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install core + pytest only (no PyYAML, no adapters)
-        run: uv pip install --system -e . pytest
+        run: |
+          uv venv
+          uv pip install -e . pytest
       - name: Run core tests forcing the stdlib YAML path
         env:
           AGENTTAPE_FORCE_STDLIB_YAML: "1"
-        run: pytest -q tests/test_yaml_io.py tests/test_engine.py tests/test_core_units.py tests/test_freeze.py
+        run: uv run --no-sync pytest -q tests/test_yaml_io.py tests/test_engine.py tests/test_core_units.py tests/test_freeze.py
