@@ -9,8 +9,8 @@ dependency-free.
 
 | Adapter | Status |
 |---------|--------|
-| OpenAI (chat + responses + tool calling) | full |
-| LangGraph (nodes, tool calls, state checkpoints) | full |
+| OpenAI (chat + responses + tool calling, sync + async) | full |
+| LangGraph (graph-state checkpoints; LLM/tool calls via the transport adapters) | built-in |
 | `httpx` / `requests` fallback | always on |
 | LangChain · LlamaIndex · CrewAI · AutoGen · MCP | extension points |
 

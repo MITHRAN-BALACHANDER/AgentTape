@@ -39,11 +39,11 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/agenttape/agenttape"
-Documentation = "https://agenttape.github.io/agenttape/"
-Repository = "https://github.com/agenttape/agenttape"
-Changelog = "https://github.com/agenttape/agenttape/blob/main/CHANGELOG.md"
-Issues = "https://github.com/agenttape/agenttape/issues"
+Homepage = "https://github.com/MITHRAN-BALACHANDER/AgentTape"
+Documentation = "https://MITHRAN-BALACHANDER.github.io/AgentTape/"
+Repository = "https://github.com/MITHRAN-BALACHANDER/AgentTape"
+Changelog = "https://github.com/MITHRAN-BALACHANDER/AgentTape/blob/main/CHANGELOG.md"
+Issues = "https://github.com/MITHRAN-BALACHANDER/AgentTape/issues"
 
 [project.optional-dependencies]
 # Robust YAML round-tripping when present; core falls back to a stdlib subset emitter/parser.

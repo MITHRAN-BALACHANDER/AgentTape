@@ -1,12 +1,12 @@
-"""LangGraph adapter — node, tool-call and state-checkpoint capture.
+"""LangGraph adapter — graph-state checkpoint capture.
 
-LangGraph runs a graph of nodes; LLM calls inside nodes already flow through the
-OpenAI / httpx adapters (so they replay for free). This adapter adds the pieces
-unique to LangGraph:
+LangGraph runs a graph of nodes; LLM and tool calls inside nodes already flow
+through the OpenAI / httpx transport adapters (so they replay for free). This
+adapter adds the piece unique to LangGraph:
 
-* **State checkpoints** — each super-step's state is captured as a ``memory_write``
-  interaction, enabling state/memory diffs between runs.
-* **Node boundaries** — node executions are wrapped so their outputs are recorded.
+* **Graph-state checkpoints** — each ``Pregel.invoke`` / ``.stream`` call is wrapped
+  and its result recorded as a ``memory_write`` interaction (boundary
+  ``graph_state``), enabling state/memory diffs between runs.
 
 The implementation is defensive: it adapts to the installed LangGraph version and
 never raises into user code. If the internal API differs, it degrades to capturing

@@ -1,11 +1,11 @@
-# AgentTape 🎞️
+# AgentTape
 
 **VCR.py for AI agents.** Record every external interaction your agent makes — LLM
 calls *and* tool calls — into human-readable "cassettes", then replay them
 deterministically so your agent tests run **offline, for free, with zero side
 effects.**
 
-[![CI](https://github.com/agenttape/agenttape/actions/workflows/ci.yml/badge.svg)](https://github.com/agenttape/agenttape/actions/workflows/ci.yml)
+[![CI](https://github.com/MITHRAN-BALACHANDER/AgentTape/actions/workflows/ci.yml/badge.svg)](https://github.com/MITHRAN-BALACHANDER/AgentTape/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/agenttape.svg)](https://pypi.org/project/agenttape/)
 [![Python](https://img.shields.io/pypi/pyversions/agenttape.svg)](https://pypi.org/project/agenttape/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -68,7 +68,7 @@ def test_agent():
     assert "hi" in run_agent().lower()
 ```
 
-## The killer feature — mixed / partial replay ("freeze all but one")
+## Mixed / partial replay — "freeze all but one"
 
 Change *one* thing — a prompt, a model, a single tool — and re-run while every
 **other** expensive or dangerous boundary stays frozen from the recording:
