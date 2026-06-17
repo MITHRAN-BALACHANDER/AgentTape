@@ -1,0 +1,216 @@
+/* AgentTape documentation chrome.
+   Clean, monochrome navbar + sidebar in the style of Vercel / Next.js docs:
+   neutral grays, hairline borders, rounded hover states, generous spacing. */
+
+:root {
+  --at-radius: 8px;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Neutral palette                                                         */
+/* ----------------------------------------------------------------------- */
+[data-md-color-scheme="default"] {
+  --at-bg: #ffffff;
+  --at-bg-soft: #fafafa;
+  --at-bg-hover: #f2f2f2;
+  --at-border: #ebebeb;
+  --at-border-strong: #e0e0e0;
+  --at-fg: #171717;
+  --at-muted: #5f5f5f;
+  --at-faint: #8f8f8f;
+  --at-header-bg: rgba(255, 255, 255, 0.85);
+
+  --md-accent-fg-color: #000000;
+  --md-typeset-a-color: #171717;
+}
+
+[data-md-color-scheme="slate"] {
+  --at-bg: #0a0a0a;
+  --at-bg-soft: #111111;
+  --at-bg-hover: #1c1c1c;
+  --at-border: #1f1f1f;
+  --at-border-strong: #2a2a2a;
+  --at-fg: #ededed;
+  --at-muted: #a1a1a1;
+  --at-faint: #7d7d7d;
+  --at-header-bg: rgba(10, 10, 10, 0.85);
+
+  --md-default-bg-color: #0a0a0a;
+  --md-code-bg-color: #111111;
+  --md-accent-fg-color: #ffffff;
+  --md-typeset-a-color: #ededed;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Top navbar                                                              */
+/* ----------------------------------------------------------------------- */
+.md-header {
+  background-color: var(--at-header-bg);
+  -webkit-backdrop-filter: saturate(180%) blur(10px);
+  backdrop-filter: saturate(180%) blur(10px);
+  color: var(--at-fg);
+  border-bottom: 1px solid var(--at-border);
+  box-shadow: none;
+}
+
+.md-header__title {
+  color: var(--at-fg);
+  font-weight: 500;
+}
+
+.md-header__button {
+  color: var(--at-fg);
+}
+
+.md-header__topic > .md-ellipsis {
+  font-weight: 600;
+}
+
+/* Repository link in the header */
+.md-header__source {
+  color: var(--at-fg);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Search (Vercel-style pill)                                              */
+/* ----------------------------------------------------------------------- */
+.md-search__form {
+  height: 2.1rem;
+  background-color: var(--at-bg-soft);
+  border: 1px solid var(--at-border-strong);
+  border-radius: var(--at-radius);
+  box-shadow: none;
+}
+
+.md-search__form:hover {
+  background-color: var(--at-bg-soft);
+  border-color: var(--at-faint);
+}
+
+.md-search__input {
+  color: var(--at-fg);
+}
+
+.md-search__input::placeholder {
+  color: var(--at-faint);
+}
+
+.md-search__icon {
+  color: var(--at-faint);
+}
+
+.md-search__output {
+  border-radius: var(--at-radius);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Sidebar — primary navigation                                           */
+/* ----------------------------------------------------------------------- */
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary {
+    border-right: 1px solid var(--at-border);
+  }
+}
+
+.md-nav {
+  font-size: 0.74rem;
+}
+
+.md-nav__title {
+  color: var(--at-faint);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+/* Section labels (navigation.sections) */
+.md-nav--primary .md-nav__item--section > .md-nav__link {
+  color: var(--at-faint);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin-top: 0.75rem;
+}
+
+.md-nav__link {
+  color: var(--at-muted);
+  border-radius: 6px;
+  padding: 0.34rem 0.55rem;
+  margin: 1px 0;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.md-nav__link:hover,
+.md-nav__link:focus {
+  color: var(--at-fg);
+  background-color: var(--at-bg-hover);
+}
+
+.md-nav__link--active,
+.md-nav__item--active > .md-nav__link {
+  color: var(--at-fg);
+  font-weight: 600;
+  background-color: var(--at-bg-hover);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Sidebar — table of contents (right)                                    */
+/* ----------------------------------------------------------------------- */
+.md-nav--secondary .md-nav__title {
+  color: var(--at-faint);
+}
+
+.md-nav--secondary .md-nav__link--active {
+  color: var(--at-fg);
+  font-weight: 600;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Content polish                                                          */
+/* ----------------------------------------------------------------------- */
+.md-typeset a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--at-border-strong);
+}
+
+.md-typeset a:hover {
+  text-decoration-color: currentColor;
+}
+
+.md-typeset pre > code,
+.md-typeset .highlight,
+.md-typeset table:not([class]) {
+  border-radius: var(--at-radius);
+}
+
+.md-typeset code {
+  border-radius: 4px;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Footer                                                                  */
+/* ----------------------------------------------------------------------- */
+.md-footer {
+  background-color: var(--at-bg);
+  color: var(--at-fg);
+  border-top: 1px solid var(--at-border);
+}
+
+.md-footer-meta {
+  background-color: var(--at-bg);
+  color: var(--at-muted);
+}
+
+.md-footer__link {
+  color: var(--at-fg);
+}
+
+.md-footer-meta__inner,
+.md-footer__inner {
+  color: var(--at-muted);
+}

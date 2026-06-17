@@ -7,6 +7,9 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  font:
+    text: Geist
+    code: Geist Mono
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -24,8 +27,16 @@ theme:
     - navigation.instant
     - navigation.tracking
     - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
     - content.code.copy
     - content.code.annotate
+    - search.suggest
+    - search.highlight
+
+extra_css:
+  - stylesheets/extra.css
 
 markdown_extensions:
   - admonition
