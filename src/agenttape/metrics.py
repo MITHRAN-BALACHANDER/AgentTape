@@ -90,9 +90,22 @@ def cassette_usage(cassette: Cassette) -> Usage:
 
 
 def final_output(cassette: Cassette) -> Any:
-    """Return the final agent output (last interaction's response)."""
+    """Return the final agent output (last non-error response).
 
+    Raw ``http`` fallback interactions are skipped when an agent-level response
+    (llm/tool/…) exists, so the "final output" is the agent's result rather than a
+    transport-layer ``{status_code, headers, …}`` envelope. If every non-error
+    interaction is ``http``, the last one is returned.
+    """
+
+    fallback: Any = None
+    seen = False
     for interaction in reversed(cassette.interactions):
-        if interaction.error is None:
+        if interaction.error is not None:
+            continue
+        if not seen:
+            fallback = interaction.response
+            seen = True
+        if interaction.kind != "http":
             return interaction.response
-    return None
+    return fallback

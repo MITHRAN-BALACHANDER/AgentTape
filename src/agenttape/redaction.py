@@ -130,14 +130,30 @@ class Redactor:
 
     # -- internals --------------------------------------------------------- #
 
+    # The HTTP adapter's byte-faithful body copy (see adapters/http.py). It is the
+    # exact wire bytes (base64), so if redaction scrubs *anything* from the same
+    # mapping the verbatim copy might still carry the secret and must be dropped.
+    _RAW_BODY_KEY = "raw_b64"
+
     def _walk(self, obj: Any, key: str | None) -> Any:
         if isinstance(obj, dict):
             result: dict[Any, Any] = {}
+            changed = False
             for k, v in obj.items():
+                if k == self._RAW_BODY_KEY:
+                    continue  # decide after we know if the body was redacted
                 if isinstance(k, str) and self.is_denylisted(k):
                     result[k] = self.config.placeholder
+                    if v != self.config.placeholder:
+                        changed = True
                 else:
-                    result[k] = self._walk(v, key=k if isinstance(k, str) else None)
+                    rv = self._walk(v, key=k if isinstance(k, str) else None)
+                    result[k] = rv
+                    if rv != v:
+                        changed = True
+            if self._RAW_BODY_KEY in obj and not changed:
+                # Nothing was scrubbed: the verbatim copy is safe to keep.
+                result[self._RAW_BODY_KEY] = obj[self._RAW_BODY_KEY]
             return result
         if isinstance(obj, list):
             return [self._walk(item, key=key) for item in obj]

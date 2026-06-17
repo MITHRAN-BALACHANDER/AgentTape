@@ -1,92 +1,148 @@
+---
+title: Partial Replay
+---
+
 # Partial Replay
 
-Run the LLM for real while keeping tools mocked.
+**Run *some* boundaries live while keeping the rest frozen. The classic use: let the LLM hit the real API to test a new prompt, while every tool stays mocked from the cassette — so you iterate fast with zero side effects.**
 
 ---
 
-## What is it?
+## The problem it solves
 
-Partial replay (also known as mixed replay) is AgentTape's killer feature. It allows you to selectively unfreeze specific parts of your agent—like the LLM—while keeping expensive or dangerous parts—like tools—frozen as recordings.
+You have a cassette of a complex run: the agent searched a vector DB, used a calculator, and wrote a row to PostgreSQL. Now you want to test whether a new system prompt — or upgrading `gpt-3.5` to `gpt-4o` — improves the agent.
 
----
+Your options *without* partial replay are both bad:
 
-## Why it exists
+- **Normal replay** fails instantly: the new prompt doesn't match the recorded one.
+- **Re-record everything** (`mode="all"`) re-runs the real PostgreSQL write. Dangerous.
 
-Imagine you have a cassette of an agent executing a complex task: it searches a vector database, uses a calculator, and writes a row to PostgreSQL.
-
-Now, you want to test if upgrading from `gpt-3.5` to `gpt-4o` makes the agent faster, or if a new system prompt improves its reasoning.
-
-If you just run a normal replay, the test fails immediately because the new prompt doesn't match the old recorded prompt. If you delete the cassette and re-record `all`, you have to execute the real PostgreSQL write again, which is dangerous.
-
-Partial replay solves this. It lets you say: **"Let the LLM run against the real OpenAI API, but if it tries to call a tool, feed it the results from the cassette."**
+Partial replay is the third way: *"Run the LLM for real, but serve every tool from the cassette."*
 
 ---
 
-## Quick Example
+## How it works
 
-You enable partial replay by passing a `live` set to `use_cassette`.
+Pass a `live` set to `use_cassette`. Anything in the set executes for real; everything else replays from the cassette.
 
 ```python
 import agenttape
 
-# Only the LLM runs for real. Every tool is served from the cassette.
+# Only the LLM runs for real. Every tool is served frozen from the cassette.
 with agenttape.use_cassette("checkout", live={"llm"}):
     result = run_agent()
 ```
 
-### What happens?
+```mermaid
+flowchart TD
+    A[Agent] --> L[LLM call]
+    L -->|live = real API| OAI[OpenAI]
+    A --> T[charge_card tool]
+    T -->|frozen = from cassette| C[(checkout.yaml)]
+    T -.->|never executes| Card[real charge]
+```
 
-1.  The agent sends the new prompt to OpenAI. **(Real network call, costs money)**.
-2.  OpenAI responds and decides to call the `charge_card` tool.
-3.  AgentTape intercepts the tool call. Because `tool` is not in the `live` set, AgentTape looks in the `checkout.yaml` cassette.
-4.  It returns the saved `charge_card` result. **(Zero side effects)**.
+!!! success "What happens"
+    1. The agent sends the **new** prompt to OpenAI — a real call that costs money.
+    2. OpenAI replies and decides to call `charge_card`.
+    3. `charge_card` is **not** in `live`, so AgentTape serves its result from the cassette.
+    4. Zero side effects — no real charge.
 
-When the run finishes, AgentTape does not overwrite your original `checkout.yaml`. Instead, it writes a new file called `checkout.derived.yaml`.
+---
 
-You can then compare them to see exactly how your prompt change affected the agent's behavior:
+## Derived cassettes: your original is never touched
+
+When a live boundary runs in `mode="none"`, AgentTape writes the new run to a **separate** file — `name.derived.yaml` — and leaves your original cassette untouched. Diff them to see exactly what your change did:
 
 ```bash
 agenttape diff cassettes/checkout.yaml cassettes/checkout.derived.yaml
 ```
 
+This is the honest framing: a live boundary **really executes** (real cost), so the result is *derived*, not a deterministic replay of the original.
+
 ---
 
-## Defining Boundaries
+## What the tokens mean
 
-The strings you pass to the `live` set match the `kind` or `boundary` of interactions in your cassette.
+The strings in `live` (and `frozen`) match an interaction's **kind** or **boundary name**:
 
-*   `"llm"`: Unfreezes all language model calls.
-*   `"tool"`: Unfreezes all functions decorated with `@agenttape.tool`.
-*   `"charge_card"`: Unfreezes only the specific tool named `charge_card`.
-
-You can also pass a `frozen` set, which does the exact opposite: it forces specific boundaries to use the cassette, even if the global mode is `record`.
+| Token | Matches |
+| --- | --- |
+| `"llm"` | All LLM calls |
+| `"tool"` | All `@agenttape.tool` functions |
+| `"charge_card"` | Only the tool named `charge_card` |
+| `"*"` | Everything |
 
 ```python
-# Record a new session, but DO NOT run the dangerous tool.
-# It MUST use the saved response from the cassette.
-with agenttape.use_cassette("checkout", mode="record", frozen={"charge_card"}):
-    run_agent()
+# Run the LLM and the search tool live; keep everything else frozen
+with agenttape.use_cassette("rag", live={"llm", "search_docs"}):
+    ...
 ```
 
 ---
 
-## Strict Adherence
+## `live` vs `frozen` — the inverse
 
-If you run an LLM live, it might decide to call a tool that wasn't called in the original recording. Or it might call a tool with different arguments.
+`frozen` is the opposite of `live`: it forces specific boundaries to replay from the cassette **even in a recording mode**. Use it to record a fresh run while protecting a dangerous tool.
 
-If this happens, AgentTape **fails immediately** with an `UnmatchedInteractionError`. Because the tool is not marked as `live`, AgentTape refuses to execute it for real. It will only return exact matches from the cassette.
+```python
+# Record a new session, but DO NOT run the real charge — replay it from the cassette.
+with agenttape.use_cassette("checkout", mode="record", frozen={"charge_card"}):
+    run_agent()
+```
 
-This guarantees that a hallucinating LLM cannot accidentally wipe your database during a test run.
+!!! warning "Pick one"
+    `live` and `frozen` are mutually exclusive — pass one or the other, not both. `live` = "run only these for real"; `frozen` = "replay only these."
+
+---
+
+## Strict adherence keeps you safe
+
+A live LLM might call a tool the original run didn't, or call it with different arguments. Because that tool is **not** live, AgentTape will **not** execute it for real — it raises [`UnmatchedInteractionError`](debugging.md) and fails the test.
+
+```mermaid
+flowchart TD
+    L[Live LLM hallucinates:<br/>charge_card amount=500] --> T{charge_card recorded<br/>with amount=500?}
+    T -->|no| E[Raise — never charges $500]
+    T -->|yes| R[Serve recorded result]
+```
+
+A hallucinating model cannot wipe your database during a partial-replay test. That's the guarantee.
+
+---
+
+## A perfect fit: RAG iteration
+
+RAG apps are the textbook case — freeze the expensive retrieval, iterate the synthesis prompt live:
+
+```python
+with agenttape.use_cassette("rag_test", live={"llm"}):
+    answer = agent.run("How do I reset my password?")
+```
+
+Retrieval is served from the cassette (no re-embedding, no vector DB hit); only the LLM runs live. See [Recording Vector Stores](recording-vector-stores.md).
+
+---
+
+## FAQ
+
+??? question "Does partial replay overwrite my cassette?"
+    No. In `mode="none"`, a live run writes `name.derived.yaml` and leaves the original intact.
+
+??? question "Can I run everything live but freeze just one tool?"
+    Yes — use `frozen={"charge_card"}` with a recording mode, or `live={"*"}` minus what you want frozen (use `frozen` for that case, since it's the inverse).
+
+??? question "Why did my partial-replay run fail when the LLM called a new tool?"
+    Because the new tool call isn't in the cassette and isn't `live`, so AgentTape refused to run it for real. Either add that tool to `live` (accepting the real side effect) or re-record.
 
 ---
 
 ## Summary
 
-*   Partial replay lets you test new prompts/models without triggering real side effects.
-*   Use `live={"llm"}` to let LLMs hit the network while tools stay mocked.
-*   AgentTape writes a `.derived.yaml` file so you can diff the results.
-*   If a live LLM tries to do something new with a frozen tool, the test fails safely.
+- `live={...}` runs selected boundaries for real and serves the rest from the cassette.
+- The classic use is `live={"llm"}` to test prompts/models with tools safely frozen.
+- Results go to a `.derived.yaml` file; your original is never mutated.
+- `frozen={...}` is the inverse; the two are mutually exclusive.
+- A live LLM can't trigger an unrecorded frozen tool — AgentTape fails loud instead.
 
----
-
-**Next Steps**: Learn how to ensure your cassettes don't leak secrets in [Redaction](redaction.md).
+[Next: Redaction →](redaction.md){ .md-button .md-button--primary }

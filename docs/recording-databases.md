@@ -1,86 +1,102 @@
+---
+title: Recording Databases
+---
+
 # Recording Databases
 
-How to safely mock SQL and NoSQL database interactions.
+**Don't mock the database driver. Record the *boundary* — the function that talks to the database — with `@agenttape.tool`. Reads and writes become fast, offline, side-effect-free mocks on replay.**
 
 ---
 
-## What is it?
+## Why not intercept the driver?
 
-Agents often need to read from or write to databases. Testing these interactions is notoriously difficult: you either have to spin up a local test database (which is slow) or mock the database driver (which is brittle).
+AgentTape deliberately does **not** hook the PostgreSQL wire protocol or MongoDB sockets. Drivers maintain connection pools, binary formats, and streaming cursors that don't serialize cleanly to YAML. Intercepting there is brittle and lossy.
 
-AgentTape allows you to record the inputs and outputs of your database queries, turning them into fast, offline mocks during replay.
+Instead, mock one level up — at the **semantic boundary** between your app and the database.
+
+```mermaid
+flowchart LR
+    App[Your agent] --> Fn["@agenttape.tool<br/>fetch_user(42)"]
+    Fn -->|record: runs SQL| DB[(PostgreSQL)]
+    Fn -->|replay: returns saved dict| C[(cassette)]
+    Fn -.->|replay never connects| DB
+```
 
 ---
 
-## The Problem with Database Drivers
-
-AgentTape does not attempt to intercept low-level database protocols (like the PostgreSQL wire protocol or MongoDB sockets).
-
-Intercepting at the socket level is brittle because database drivers often maintain complex connection pools, binary formats, and streaming cursors that are nearly impossible to serialize cleanly into YAML.
-
----
-
-## The Solution: Semantic Boundaries
-
-Instead of mocking the database driver, you should mock the **boundary** between your application and the database. You do this using the `@agenttape.tool` decorator.
-
-### Example: Reading from a Database
+## Reading from a database
 
 ```python
 import agenttape
 import psycopg2
 
-# 1. Define the boundary
 @agenttape.tool
-def fetch_user_record(user_id: int) -> dict:
+def fetch_user_record(user_id: int) -> dict | None:
     conn = psycopg2.connect("dbname=production")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
-    row = cursor.fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
+    row = cur.fetchone()
     return {"id": row[0], "name": row[1], "email": row[2]} if row else None
-
-# 2. The agent uses the boundary
-def agent_logic():
-    user = fetch_user_record(42)
-    # ... logic ...
 ```
 
-During **recording**, AgentTape executes `fetch_user_record`, allowing it to connect to PostgreSQL and run the query. It saves the argument `42` and the returned dictionary to the cassette.
+=== "Record"
 
-During **replay**, AgentTape intercepts `fetch_user_record(42)`. It never executes the inner code. It never imports `psycopg2`. It never tries to connect to a database. It simply returns the saved dictionary.
+    AgentTape runs `fetch_user_record(42)`, connects to PostgreSQL, runs the query, and saves `args={user_id: 42}` plus the returned dict.
 
-### Example: Writing to a Database
+=== "Replay"
 
-The exact same pattern applies to writes.
+    AgentTape intercepts `fetch_user_record(42)`. It **never** runs the inner code, never imports `psycopg2`, never connects. It returns the saved dict.
+
+---
+
+## Writing to a database
+
+The same pattern makes destructive writes safe in tests:
 
 ```python
 @agenttape.tool
 def update_user_status(user_id: int, status: str) -> bool:
     conn = psycopg2.connect("dbname=production")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET status = %s WHERE id = %s", (status, user_id))
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET status = %s WHERE id = %s", (status, user_id))
     conn.commit()
     return True
 ```
 
-In replay mode, `update_user_status` will return `True` without ever modifying the real database. This is what makes AgentTape safe for CI.
+On replay, `update_user_status("active", 42)` returns `True` **without modifying the real database**. This is exactly what makes AgentTape safe for CI — a test can't accidentally mutate production.
+
+!!! danger "Recording still writes for real"
+    Recording executes the function, so the `UPDATE` really runs. Record against a disposable/staging database, or use [`frozen={"update_user_status"}`](mixed-replay.md#live-vs-frozen-the-inverse) to record the rest of a run while serving the write from the cassette.
 
 ---
 
-## Best Practices
+## Best practices
 
-*   **Serialize at the boundary**: Ensure the function you decorate returns simple, serializable Python objects (dicts, lists, strings, ints). Do not return active database cursors or ORM models. Convert them to dicts before returning.
-*   **Keep boundaries focused**: Don't wrap a function that contains 50 lines of business logic and one database query. Extract the database query into a small helper function, and wrap the helper.
+!!! tip
+    - **Return plain data.** Convert rows, cursors, and ORM models to dicts/lists *before* returning. AgentTape serializes the return value to YAML — a live cursor won't survive.
+    - **Keep boundaries thin.** Don't wrap a 50-line handler with one query inside. Extract the query into a small function and wrap that.
+    - **Connection handling stays inside the boundary** (or global), so it isn't part of the matched arguments. See [the golden rule](tools.md#the-golden-rule-serialize-at-the-boundary).
+
+---
+
+## FAQ
+
+??? question "What about an ORM like SQLAlchemy?"
+    Same approach — wrap the function that performs the query and returns results, and return dicts rather than ORM instances. AgentTape doesn't care which library you use; it only records the boundary's inputs and outputs.
+
+??? question "My read returns thousands of rows — is that a problem?"
+    It just makes the cassette larger. That's fine for correctness; if a cassette gets very large, see [Performance](performance.md) for the faster YAML backend.
+
+??? question "Can I test error paths, like a unique-constraint violation?"
+    Yes — AgentTape records raised exceptions too, and re-raises them (as the real type when importable) on replay. You can also hand-edit the cassette to inject an `error`. See [Working Offline](working-offline.md#faking-errors).
 
 ---
 
 ## Summary
 
-*   AgentTape does not intercept low-level database drivers.
-*   Use `@agenttape.tool` to define semantic boundaries around your database queries.
-*   Ensure the decorated function returns serializable data (like dicts), not cursors.
-*   This pattern makes tests fast, offline, and safe from destructive writes.
+- AgentTape doesn't intercept DB drivers — it records the function around the query.
+- `@agenttape.tool` makes reads and writes replayable and side-effect-free.
+- Return serializable data (dicts/lists), not cursors or ORM models.
+- Recording runs the query for real; replay never connects.
 
----
-
-**Next Steps**: Apply this same logic to [Recording Vector Stores](recording-vector-stores.md).
+[Next: Recording Vector Stores →](recording-vector-stores.md){ .md-button .md-button--primary }

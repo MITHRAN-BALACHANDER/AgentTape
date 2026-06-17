@@ -1,64 +1,86 @@
+---
+title: Performance
+---
+
 # Performance
 
-Understanding the speed and memory footprint of AgentTape.
+**Replay is CPU-only and local, so it's orders of magnitude faster than live calls. This page covers the numbers, the YAML parser trade-off, and memory behavior.**
 
 ---
 
-## What is it?
+## Replay speed
 
-AgentTape is designed to be fast enough that it doesn't slow down your local development cycle, and memory-efficient enough that it can handle thousands of cassettes in a CI pipeline.
+In `mode="none"`, AgentTape does dictionary lookups, string hashing, and YAML parsing — no network at all.
+
+| | Live call | Replayed call |
+| --- | --- | --- |
+| Typical OpenAI request | 1–5 s | **< 5 ms** |
+| Source of the time | Network + model | Local hash + lookup |
+
+Because network latency disappears, a suite that takes **10 minutes** against live APIs commonly finishes in **under 5 seconds** on replay.
+
+```mermaid
+flowchart LR
+    L["Live: 10 min ⏳"] -->|remove network| R["Replay: ~5 s ⚡"]
+```
+
+!!! warning "Replay is *not* a latency benchmark"
+    The recorded `latency_ms` reflects the real call's duration (AgentTape never freezes `perf_counter`), but replay itself returns almost instantly. Don't use replay to measure real-world performance.
 
 ---
 
-## Replay Speed
+## The YAML parser trade-off
 
-In `mode="none"`, AgentTape is a purely local CPU-bound process. It performs dictionary lookups, string comparisons, and YAML parsing.
+To keep zero dependencies, AgentTape ships a **pure-Python** YAML emitter/parser tuned for cassette shapes. For the vast majority of cassettes it's plenty fast.
 
-A typical LLM call using the OpenAI SDK takes **1-5 seconds**.
+The exception is **large** cassettes — e.g. a RAG step that captured 10 MB of retrieved text. Pure-Python parsing of a multi-megabyte file becomes the bottleneck when a session starts.
 
-The exact same call, intercepted and replayed by AgentTape, takes **< 5 milliseconds**.
-
-Because network latency is completely eliminated, a test suite that normally takes 10 minutes to run against live APIs will often complete in under 5 seconds when replayed.
-
----
-
-## The YAML Parser
-
-Because AgentTape guarantees zero external dependencies by default, it uses a custom, built-in YAML parser (`agenttape.yaml_io`).
-
-This parser is optimized for the specific shapes of AgentTape cassettes, but it is written in pure Python. For 99% of use cases, it is fast enough.
-
-### Large Cassettes
-
-If your agent fetches massive context documents (e.g., retrieving 10MB of text from a vector database), the cassette file will be large. The pure Python YAML parser can become a bottleneck when loading a 10MB file.
-
-If you notice AgentTape taking a long time to start a session, you should install the optional `PyYAML` dependency.
+**Fix:** install the optional PyYAML extra. AgentTape then uses its C-accelerated loader automatically.
 
 ```bash
 pip install "agenttape[yaml]"
 ```
 
-When `PyYAML` is installed, AgentTape automatically switches to using its C-extension backed parser (`yaml.CSafeLoader`), which is significantly faster for large files.
+| Cassette size | Default (stdlib) | With `[yaml]` |
+| --- | --- | --- |
+| Typical (KB–low MB) | Fast | Fast |
+| Large (multi-MB) | Can be slow to load | C-accelerated |
+
+!!! tip "Keep cassettes lean"
+    Before reaching for the faster parser, consider whether you need to record megabytes of context at all. Large binary payloads are already offloaded to an assets sidecar; trimming captured text keeps cassettes both fast *and* readable.
 
 ---
 
-## Memory Footprint
+## Memory footprint
 
-AgentTape only loads a cassette into memory when a `Session` begins (e.g., when the `use_cassette` context manager is entered).
+AgentTape loads a cassette into memory only while its `Session` is open, and frees it on exit. A 1,000-test suite where each test uses a different cassette holds **one** cassette in memory at a time — so the pytest plugin's overhead stays low regardless of suite size.
 
-When the session ends, the memory is freed.
+```mermaid
+flowchart LR
+    T1[test 1] --> O1[load cassette 1] --> C1[close, free]
+    C1 --> T2[test 2] --> O2[load cassette 2] --> C2[close, free]
+```
 
-If you have a test suite with 1,000 tests, each using a different cassette, AgentTape will only ever have one cassette in memory at a time. This keeps the memory overhead of the `pytest` plugin extremely low, regardless of the size of your test suite.
+---
+
+## FAQ
+
+??? question "Does the freeze layer slow things down?"
+    Negligibly. It patches a handful of stdlib callables once per process (reference-counted) and dispatches through a ContextVar. The cost is dwarfed by removing network latency.
+
+??? question "Will many concurrent sessions contend?"
+    Patches are installed once and shared (ref-counted, lock-guarded); per-session state lives in ContextVars, so concurrent asyncio tasks and threads don't serialize on a global lock during interception.
+
+??? question "How do I see where time went in a recorded run?"
+    `agenttape timeline cassettes/x.yaml` renders an ASCII waterfall with per-interaction latency, and `agenttape inspect` totals latency and tokens.
 
 ---
 
 ## Summary
 
-*   Replay mode is orders of magnitude faster than live execution because it eliminates network latency.
-*   The default YAML parser is fast enough for most use cases.
-*   Install `agenttape[yaml]` for C-extension speed if dealing with massive >5MB cassettes.
-*   AgentTape streams cassettes one at a time, keeping memory usage low.
+- Replay eliminates network latency: ~milliseconds per call, often a 100× faster suite.
+- The default pure-Python YAML parser is fine until cassettes get large; then `pip install "agenttape[yaml]"`.
+- Cassettes are loaded one at a time, so memory stays flat across big suites.
+- Replay speed is not a real-latency benchmark — recorded `latency_ms` is the real number.
 
----
-
-**Next Steps**: Learn how to build on top of AgentTape in [Extending AgentTape](extending.md).
+[Next: Extending AgentTape →](extending.md){ .md-button .md-button--primary }

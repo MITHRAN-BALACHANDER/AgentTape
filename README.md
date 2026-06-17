@@ -1,8 +1,8 @@
 # AgentTape
 
-Deterministic record and replay for AI agents.
+**Deterministic record & replay for AI agents.**
 
-AgentTape captures every external interaction your agent makes—both LLM calls and tool executions—into human-readable "cassettes." It then replays them deterministically so your tests run **offline, for free, with zero side effects.**
+AgentTape captures every external interaction your agent makes — both LLM calls **and** tool executions — into human-readable YAML "cassettes," then replays them deterministically so your tests run **offline, for free, with zero side effects.**
 
 [![CI](https://github.com/MITHRAN-BALACHANDER/AgentTape/actions/workflows/ci.yml/badge.svg)](https://github.com/MITHRAN-BALACHANDER/AgentTape/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/agenttape.svg)](https://pypi.org/project/agenttape/)
@@ -10,27 +10,24 @@ AgentTape captures every external interaction your agent makes—both LLM calls 
 [![Python](https://img.shields.io/pypi/pyversions/agenttape.svg)](https://pypi.org/project/agenttape/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+> **Full documentation:** https://MITHRAN-BALACHANDER.github.io/AgentTape/
+
 ---
 
-## What is it?
+## What it does
 
-AgentTape is a testing and debugging tool for AI applications. It sits between your agent and the outside world.
+AgentTape sits between your agent and the outside world.
 
-When you run your agent in **record mode**, AgentTape saves every API call, prompt, and tool execution to a YAML file (a cassette).
+- **Record** — run your agent against the real OpenAI API, database, and tools. AgentTape saves every call to a YAML cassette.
+- **Replay** — run the same code with the network off. AgentTape serves the saved responses in milliseconds. Your code can't tell the difference.
 
-When you run your agent in **replay mode**, AgentTape intercepts all network and tool calls and serves the exact responses saved in the cassette. Your code thinks it's talking to the real world, but it's completely offline.
+The usual alternative — hand-written mocks — tests your *assumptions* about a service, not the service itself. AgentTape records the **real** interaction once, then replays it.
 
 ## Why it exists
 
-Agent tests are traditionally slow, flaky, expensive, and dangerous.
+Agent tests are normally slow, flaky, expensive, and dangerous: every run hits live LLM APIs (latency, cost, non-determinism) and executes real tools. If a tool charges a card, writes to a database, or posts to Slack, a test run actually does it. AgentTape gives you the realism of end-to-end tests with the speed and safety of mocks.
 
-Every test run hits real LLM APIs (incurring latency, cost, and non-determinism) and executes real tools. If a tool charges a credit card, writes to a database, or posts to Slack—a test run will actually perform those actions.
-
-Without AgentTape, you have to choose between writing fragile mocks or running expensive, slow end-to-end tests. AgentTape gives you the best of both worlds: the realism of end-to-end tests with the speed and safety of mocks.
-
-## Quick Example
-
-Here is the smallest possible working example.
+## Quick example
 
 ```python
 import agenttape
@@ -44,46 +41,81 @@ def run_agent():
     )
     return resp.choices[0].message.content
 
-# 1. Record (hits the real API once, writes to cassettes/hello.yaml)
+# 1. Record — calls the real API once, writes cassettes/hello.yaml
 with agenttape.use_cassette("hello", mode="record"):
     print(run_agent())
 
-# 2. Replay (zero network calls, completely free, perfectly deterministic)
+# 2. Replay — zero network, free, identical output every time
 with agenttape.use_cassette("hello", mode="none"):
-    print(run_agent()) # Outputs the exact same text, served from the cassette
+    print(run_agent())
 ```
 
-**What happened?**
-The first time you run this, AgentTape talks to OpenAI and saves the prompt and response. The second time, AgentTape blocks the network request and immediately returns the saved response.
+The first block calls OpenAI and saves the prompt and response. The second block blocks the network and returns the saved response instantly.
 
-## Key Features
+## Record your own tools
 
-- **Local-first**: No servers, no network required in replay, no telemetry.
-- **Deterministic**: The same inputs always produce the exact same recorded outputs, byte-for-byte.
-- **Zero side effects**: A replayed tool never executes for real. Safe for CI.
-- **Almost-no-code integration**: Add a single decorator or `with` block to your existing code.
-- **Git-friendly**: Cassettes are plain YAML. You can read, diff, and hand-edit them.
-- **Zero core dependencies**: The engine is built entirely on the Python standard library.
+Wrap any side-effecting function. It runs normally while recording and returns the saved output during replay — **it never executes for real on replay.**
+
+```python
+@agenttape.tool
+def charge_card(amount: int) -> dict:
+    return payment_api.charge(amount)   # real side effect, skipped on replay
+```
+
+## Key features
+
+- **Local-first** — no servers, no telemetry, no network during replay.
+- **Deterministic** — same inputs → same recorded output, byte-for-byte (time, UUIDs, and randomness are frozen).
+- **Zero side effects** — a replayed tool never runs for real. Safe for CI.
+- **Almost-no-code** — one `with` block or one decorator; your agent code is unchanged.
+- **Git-friendly** — cassettes are plain YAML you can read, diff, and hand-edit.
+- **Partial replay** — run the LLM live against a new prompt while tools stay frozen.
+- **Zero core dependencies** — the engine runs on the Python standard library alone.
 
 ## Installation
 
-Install AgentTape using pip. The core package has no external dependencies.
+```bash
+pip install agenttape            # core (stdlib only, zero deps)
+pip install "agenttape[openai]"  # + automatic OpenAI interception
+pip install "agenttape[yaml]"    # + PyYAML for faster large-cassette parsing
+pip install "agenttape[all]"     # everything
+```
+
+## pytest integration
+
+```python
+import pytest
+
+@pytest.mark.agenttape("weather_agent")
+def test_weather(agenttape_cassette):
+    result = run_agent()
+    assert "sunny" in result.lower()
+    agenttape_cassette.assert_tool_calls(["get_location", "get_weather"])
+```
 
 ```bash
-pip install agenttape            # core (stdlib only)
-pip install "agenttape[openai]"  # + OpenAI adapter
-pip install "agenttape[yaml]"    # + PyYAML for extra-robust YAML loading
+pytest                      # offline replay (mode=none) — the default
+pytest --agenttape-record   # (re)record against real services
+```
+
+## CLI
+
+```bash
+agenttape init                       # scaffold agenttape.toml + cassettes/
+agenttape inspect cassettes/x.yaml   # interactions, latency, tokens
+agenttape timeline cassettes/x.yaml  # ASCII waterfall
+agenttape diff a.yaml b.yaml         # structured diff of two runs
+agenttape view cassettes/x.yaml      # self-contained HTML viewer
 ```
 
 ## Documentation
 
-Ready to start building? Check out our documentation:
-
-- [Introduction](https://MITHRAN-BALACHANDER.github.io/AgentTape/)
-- [Quickstart](https://MITHRAN-BALACHANDER.github.io/AgentTape/quickstart)
-- [Core Concepts](https://MITHRAN-BALACHANDER.github.io/AgentTape/cassettes)
-- [Guides](https://MITHRAN-BALACHANDER.github.io/AgentTape/testing-ai-apps)
+| Start here | Go deeper |
+| --- | --- |
+| [What is AgentTape?](https://MITHRAN-BALACHANDER.github.io/AgentTape/) | [Core Concepts](https://MITHRAN-BALACHANDER.github.io/AgentTape/cassettes/) |
+| [Your First Recording](https://MITHRAN-BALACHANDER.github.io/AgentTape/your-first-recording/) | [Testing AI Apps](https://MITHRAN-BALACHANDER.github.io/AgentTape/testing-ai-apps/) |
+| [Quickstart](https://MITHRAN-BALACHANDER.github.io/AgentTape/quickstart/) | [Python API Reference](https://MITHRAN-BALACHANDER.github.io/AgentTape/api/) |
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

@@ -76,7 +76,7 @@ _TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>🎞️ AgentTape</h1>
+  <h1> AgentTape</h1>
   <span class="muted" id="subtitle"></span>
 </header>
 <main id="root"></main>

@@ -37,6 +37,11 @@ class AgentTape:
         # Requests captured at ``on_*_start`` time, keyed by run id, so the matching
         # ``on_*_end`` can record the real prompt/input/query rather than a placeholder.
         self._pending: dict[Any, dict[str, Any]] = {}
+        # Engine ``executed`` length at each boundary's start. If it grew by the time
+        # the boundary ends, a transport adapter (OpenAI / httpx) already captured the
+        # underlying call, so this observational callback must NOT record it again —
+        # otherwise the same LLM/tool call lands in the cassette twice.
+        self._baseline: dict[Any, int] = {}
         self.events: list[dict[str, Any]] = []
 
     # -- generic event sink ------------------------------------------------ #
@@ -90,13 +95,10 @@ class AgentTape:
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
         request = self._take_request(run_id, {"prompts": "<via-callback>"})
-        self._record(
-            "llm",
-            request,
-            _jsonable(response),
-            boundary="llm",
-            latency_ms=self._latency(run_id),
-        )
+        latency = self._latency(run_id)
+        if self._transport_recorded(run_id):
+            return
+        self._record("llm", request, _jsonable(response), boundary="llm", latency_ms=latency)
 
     def on_tool_start(self, serialized: Any, input_str: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id", id(input_str))
@@ -108,12 +110,15 @@ class AgentTape:
         run_id = kwargs.get("run_id")
         name = kwargs.get("name", "tool")
         request = self._take_request(run_id, {"name": name})
+        latency = self._latency(run_id)
+        if self._transport_recorded(run_id):
+            return
         self._record(
             "tool",
             request,
             _jsonable(output),
             boundary=str(request.get("name", name)),
-            latency_ms=self._latency(run_id),
+            latency_ms=latency,
         )
 
     def on_retriever_start(self, serialized: Any, query: Any, **kwargs: Any) -> None:
@@ -124,12 +129,15 @@ class AgentTape:
     def on_retriever_end(self, documents: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
         request = self._take_request(run_id, {"query": "<via-callback>"})
+        latency = self._latency(run_id)
+        if self._transport_recorded(run_id):
+            return
         self._record(
             "retrieval",
             request,
             _jsonable(documents),
             boundary="retrieval",
-            latency_ms=self._latency(run_id),
+            latency_ms=latency,
         )
 
     # -- helpers ----------------------------------------------------------- #
@@ -139,11 +147,29 @@ class AgentTape:
 
         self._starts[run_id] = time.perf_counter()
         self._pending[run_id] = request
+        session = active_session()
+        self._baseline[run_id] = len(session.engine.executed) if session is not None else 0
 
     def _take_request(self, run_id: Any, fallback: dict[str, Any]) -> dict[str, Any]:
         """Return the request captured at start, or ``fallback`` if none was paired."""
 
         return self._pending.pop(run_id, None) or fallback
+
+    def _transport_recorded(self, run_id: Any) -> bool:
+        """True if a transport adapter already recorded this boundary's underlying call.
+
+        Detected by the engine's ``executed`` list growing between this boundary's
+        start and end — meaning the OpenAI/httpx adapter captured it. Recording it
+        again from the observational callback would duplicate the interaction.
+        """
+
+        baseline = self._baseline.pop(run_id, None)
+        if baseline is None:
+            return False
+        session = active_session()
+        if session is None:
+            return False
+        return len(session.engine.executed) > baseline
 
     def _latency(self, run_id: Any) -> float | None:
         start = self._starts.pop(run_id, None)

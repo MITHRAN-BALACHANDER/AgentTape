@@ -1,95 +1,154 @@
+---
+title: Custom Adapters
+---
+
 # Custom Adapters
 
-Writing adapters to intercept unsupported libraries.
+**An adapter patches a library's client so its calls route through the AgentTape engine automatically — no `@tool` wrapping, no code changes for users. This is how the OpenAI adapter works, and how you'd add one for Anthropic, Gemini, or any SDK.**
 
 ---
 
-## What is it?
+## When you need one
 
-An **adapter** is a piece of code that hooks into a third-party library (like the Anthropic SDK or the Stripe SDK) to automatically capture its network requests and responses into the AgentTape engine.
+You have three ways to capture a call: a dedicated **adapter**, the always-on **httpx/requests fallback**, or a **`@agenttape.tool`** wrapper. Reach for a custom adapter when:
 
----
+- The SDK isn't built on `httpx`/`requests` (so the fallback can't see it), **or**
+- You want rich semantics (token usage, model params) and to hand users back real SDK objects, **or**
+- You want users to need *zero* code changes — just `use_cassette` and their normal SDK calls.
 
-## Why it exists
-
-While you can always use `@agenttape.tool` to wrap a function that calls an API, writing an adapter allows AgentTape to intercept the library *automatically*. Users won't have to change their application code; they just use the SDK normally inside a `use_cassette` block.
-
----
-
-## How it Works
-
-An adapter is essentially a Python monkey-patch that intercepts a specific function call.
-
-To write an adapter, you need to understand the internal API of the library you want to intercept. You find the lowest-level function where the network request is made (or where the request data is fully formed), patch it to record the data, and then patch it to return the recorded data during replay.
-
-### The Adapter Interface
-
-AgentTape adapters are not currently exposed via a public, stable API plugin system. They must be added directly to the AgentTape codebase in the `src/agenttape/adapters/` directory.
-
-An adapter must implement a specific registration function that AgentTape calls when it initializes.
-
-```python
-# src/agenttape/adapters/my_api.py
-
-import unittest.mock
-from agenttape.engine import engine
-
-def register() -> None:
-    # 1. Store the original, real function
-    import my_api_sdk
-    original_call = my_api_sdk.Client.make_request
-
-    # 2. Define the interceptor function
-    def interceptor(self, *args, **kwargs):
-
-        # 3. Serialize the request
-        request_data = {"args": args, "kwargs": kwargs}
-
-        # 4. Check if AgentTape wants to replay this
-        if engine.should_replay("http", request_data):
-            # 5a. Return the recorded response
-            recorded_response = engine.get_replay("http", request_data)
-            return _deserialize_response(recorded_response)
-
-        # 5b. Otherwise, execute the real function
-        real_response = original_call(self, *args, **kwargs)
-
-        # 6. Record the result
-        response_data = _serialize_response(real_response)
-        engine.record("http", request_data, response_data)
-
-        return real_response
-
-    # 7. Apply the patch
-    patcher = unittest.mock.patch("my_api_sdk.Client.make_request", new=interceptor)
-    patcher.start()
+```mermaid
+flowchart LR
+    U[User's normal SDK call] --> P[Your adapter's patch]
+    P --> S{active_session?}
+    S -->|None| O[call original — pass through]
+    S -->|session| E["session.engine.intercept(kind, request, executor=…)"]
+    E --> R[replay recorded / execute + record]
 ```
 
-### Serialization
+---
 
-The hardest part of writing an adapter is writing `_serialize_response` and `_deserialize_response`.
+## The `Adapter` interface
 
-The `request_data` and `response_data` you pass to the AgentTape engine **must be purely serializable Python primitives** (dicts, lists, strings, ints, floats).
+An adapter is a class with three methods. Subclass `Adapter` and register an instance.
 
-If the SDK returns a complex object (like a `MyApiResponse` class), you must unpack that class into a dictionary for `record()`, and then reconstruct the class from the dictionary during replay so the application code doesn't notice the difference.
+```python
+from agenttape.adapters.base import Adapter, RefCountedPatch
+from agenttape.recorder import active_session
+
+class MyAdapter(Adapter):
+    name = "my_sdk"
+
+    def __init__(self) -> None:
+        self._patch = RefCountedPatch()
+
+    def available(self) -> bool:
+        """True if the target library is importable."""
+        try:
+            import my_sdk  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def install(self, session) -> None:
+        """Patch the target. RefCountedPatch installs once across nested sessions."""
+        self._patch.acquire(self._do_install)
+
+    def uninstall(self) -> None:
+        self._patch.release()
+
+    def _do_install(self) -> list:
+        import my_sdk
+        original = my_sdk.Client.make_request
+
+        def interceptor(self_obj, *args, **kwargs):
+            session = active_session()
+            if session is None:                 # outside a session: pass through
+                return original(self_obj, *args, **kwargs)
+            request = _serialize_request(kwargs)  # MUST be JSON-like primitives
+            def executor():
+                return _serialize_response(original(self_obj, *args, **kwargs))
+            recorded = session.engine.intercept(
+                "http", request, boundary="my_sdk", executor=executor,
+            )
+            return _rehydrate(recorded)           # turn the dict back into an SDK object
+        my_sdk.Client.make_request = interceptor
+        return [lambda: setattr(my_sdk.Client, "make_request", original)]
+```
+
+Register it so every session installs it when the library is present:
+
+```python
+import agenttape.adapters as adapters
+adapters.register(MyAdapter())
+```
+
+| Method | Responsibility |
+| --- | --- |
+| `available()` | Is the target library importable? (Adapters install only when available.) |
+| `install(session)` | Patch the target to route through `session.engine`. |
+| `uninstall()` | Restore the original. |
+
+!!! tip "Use `RefCountedPatch`"
+    Nested sessions should share **one** patch that routes to whichever session is active at call time. `RefCountedPatch` installs on first acquire and restores on last release — it's lock-guarded so concurrent sessions across threads can't corrupt the count. Always check `active_session()` inside the patched callable and pass through when it's `None`.
 
 ---
 
-## Contributing Adapters
+## The hard part: serialization
 
-If you write an adapter for a popular LLM provider (Anthropic, Gemini) or a common agent framework (LangChain, LlamaIndex), please open a Pull Request!
+Everything you hand the engine — `request` and the executor's return value — **must be JSON-like primitives** (dicts, lists, strings, numbers, bools, `None`). The engine's `intercept` records the request for matching and the response for replay.
 
-The AgentTape core team maintains the official adapters to ensure they stay up to date when the underlying SDKs change.
+So your adapter has two translation jobs:
+
+1. **Serialize** the SDK's request and response objects into plain dicts before they reach the engine.
+2. **Rehydrate** the recorded dict back into the SDK's response type on replay, so the user's code (`resp.choices[0].message.content`) works unchanged.
+
+The OpenAI adapter is the reference implementation: it dumps responses with `model_dump(mode="json")` and rehydrates with `ChatCompletion.model_validate(...)`, falling back to an attribute-accessible `Box` when the SDK isn't importable (so replay works offline even without `openai`).
+
+```python title="agenttape/adapters/openai.py (excerpt)"
+def _dump(resp):
+    return resp.model_dump(mode="json")   # → plain JSON-native dict
+
+def _rehydrate_chat(data):
+    from openai.types.chat import ChatCompletion
+    return ChatCompletion.model_validate(data)   # dict → real SDK object
+```
+
+---
+
+## Patterns worth copying
+
+!!! note "From the built-in adapters"
+    - **Drop volatile/transport kwargs** from the recorded request (`stream`, `timeout`, `extra_headers`) so matching stays stable — see the OpenAI adapter's `_DROP_KEYS`.
+    - **Refuse to fake streaming.** A token stream can't be recorded deterministically; raise (or warn) rather than silently calling the network in a replay mode.
+    - **Record token usage** via the engine's `usage_extractor` hook so `agenttape inspect` can report tokens and cost.
+    - **Patch sync *and* async** entry points if the SDK has both.
+
+---
+
+## Where adapters live
+
+Adapters aren't yet exposed through a stable public plugin API — built-ins live in `src/agenttape/adapters/` and are registered in `adapters/__init__.py`. To add one, drop a module there, subclass `Adapter`, and `register()` it. The registry installs every *available* adapter per session.
+
+!!! tip "Contribute it upstream"
+    Wrote an adapter for Anthropic, Gemini, LangChain, or LlamaIndex? Open a pull request. Official adapters are maintained against SDK changes so the whole community benefits.
+
+---
+
+## FAQ
+
+??? question "Adapter vs `@agenttape.tool` — which should I write?"
+    Use `@tool` for app-level functions you own. Write an adapter when you want to intercept a *library* transparently for all its users, or to capture SDK-specific semantics. If the SDK uses httpx/requests, the [fallback](recording-apis.md) may already cover you with no work.
+
+??? question "How do I avoid double-recording when my SDK uses httpx underneath?"
+    The engine's re-entrancy guard handles it: while your adapter's executor runs, the nested httpx call passes through instead of being recorded again. The outermost boundary wins.
 
 ---
 
 ## Summary
 
-*   Adapters automatically intercept third-party SDKs.
-*   They monkey-patch the SDK's internal network methods.
-*   They must translate complex SDK objects into serializable dicts for the AgentTape engine.
-*   You are encouraged to contribute new adapters to the main repository.
+- An adapter subclasses `Adapter` (`available`/`install`/`uninstall`) and is `register()`ed.
+- Inside the patch, check `active_session()` and route through `session.engine.intercept(...)`.
+- The real work is serialization: SDK object → JSON dict for the engine, and back on replay.
+- Use `RefCountedPatch`, drop volatile kwargs, and patch sync + async.
 
----
-
-**Next Steps**: Understand the core design principles in [Internals](internals.md).
+[Next: Internals →](internals.md){ .md-button .md-button--primary }

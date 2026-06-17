@@ -8,6 +8,65 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Date/timestamp-shaped strings no longer mutate into `datetime` objects on
+  replay.** The YAML emitter left strings like `"2026-06-17"` unquoted, and PyYAML's
+  loader (its YAML-1.1 resolver) then read them back as `datetime.date` — while the
+  dependency-free stdlib parser kept them as `str`. The same cassette therefore
+  replayed different *types* depending on whether PyYAML was installed. The emitter
+  now quotes any date/datetime/sexagesimal/hex/underscore-grouped scalar, and the
+  PyYAML read path uses a loader with the implicit timestamp resolver removed, so
+  scalars stay strings unless explicitly typed on both paths.
+- **Duplicate `application/x-www-form-urlencoded` keys are preserved.** Form bodies
+  were captured as `dict(parse_qsl(...))`, collapsing repeated fields
+  (`scope=read&scope=write` → only `write`) at both record and replay. Repeats are
+  now kept as a list value, so the body round-trips losslessly while denylisted form
+  fields still expose their key to redaction.
+- **JSON HTTP bodies replay byte-for-byte when it matters.** Structured capture
+  re-serialises JSON (different whitespace/number formatting than the wire), breaking
+  consumers that read the raw body (signature/ETag checks). A verbatim `raw_b64` copy
+  is now stored *only* when re-serialisation would differ; the redactor drops it the
+  moment it scrubs anything from that body, so secrets never survive in the verbatim
+  copy, and matching ignores it entirely.
+- **Multiple response headers (notably `Set-Cookie`) survive replay.** Response
+  headers were collapsed with `dict(headers)`, comma-joining repeated names — fatal
+  for `Set-Cookie`, which must never be joined. Repeated headers are now recorded as
+  a list and re-expanded into separate header lines; `requests` replay also rebuilds
+  `response.cookies` from the recorded `Set-Cookie` lines.
+- **Volatile query parameters in a URL no longer break matching.** Canonicalization
+  parses `url` fields and drops volatile query params (`?timestamp=`, `?nonce=`,
+  presigned-URL signatures) by name, so a cache-buster or request signature in the
+  query string no longer raises `UnmatchedInteractionError` on replay. Plain
+  `exact`-matched URLs are left byte-identical.
+- **Streaming over the raw httpx fallback can no longer silently hit the network in
+  replay.** A `client.stream(...)` / `stream=True` send during offline replay now
+  raises `StreamingReplayError` (and only passes through, with a warning, when the
+  boundary would genuinely execute) — the same guarantee the OpenAI adapter already
+  enforced for token streams.
+- **Replayed SDK exceptions keep their `.response`/`.body` shape**, not just simple
+  scalar attributes, so `except RateLimitError as e: e.body["error"]["code"]` /
+  `e.response.headers["retry-after"]` keep working offline.
+- **The `AgentTape` callback no longer double-records.** When a transport adapter
+  (OpenAI / httpx) already captured a call, the observational callback detects the
+  engine's recording grew during the boundary and skips re-recording it, so the same
+  LLM/tool call no longer lands in the cassette twice (doubling token/cost metrics).
+- **A frozen `datetime.now()` returns the recorder's *local* wall clock**, matching
+  real `now()` semantics, and stores the recorder's UTC offset so it reproduces
+  identically on any machine (it previously returned UTC made naive, shifting
+  timestamps embedded in prompts by the local offset).
+- **The OpenAI adapter fails loudly if the SDK's resource layout changes** (no
+  patchable `create`), instead of silently leaving calls unrecorded.
+- **Missing asset files fail loudly on replay.** `read_cassette` now raises
+  `CassetteCorruptError` when a referenced asset sidecar file is absent, rather than
+  silently replaying the 64-char preview as if it were the full payload (tooling that
+  only inspects a cassette keeps the lenient preview fallback).
+- **A corrupt interaction (neither `response` nor `error`) is rejected** at load
+  instead of silently replaying `None`.
+- `final_output` (and the `agenttape_cassette` snapshot helper) skips raw `http`
+  fallback envelopes when an agent-level response exists, so the reported final
+  output is the agent's result rather than a `{status_code, headers, …}` dict.
+- The HTTP fallback boundary now includes scheme + port, so the same host on
+  different ports/schemes no longer collides; `@tool` argument capture and generic
+  object responses are reduced to a JSON-able form via `model_dump(mode="json")`.
 - **HTTP replay no longer corrupts compressed responses.** The raw httpx/requests
   fallback recorded the *decoded* body but kept the wire headers, so a
   `Content-Encoding: gzip` (or br/deflate) response was reconstructed with a gzip

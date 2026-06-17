@@ -104,7 +104,9 @@ def read_cassette(path: Path) -> Cassette:
         )
 
     assets_dir = assets_dir_for(path)
-    data = inline(data, assets_dir)
+    # strict: a missing asset must fail loudly on the replay path rather than
+    # silently substituting the short preview for the real recorded payload.
+    data = inline(data, assets_dir, strict=True)
     cassette = Cassette.from_dict(data)
     return cassette
 

@@ -1,88 +1,133 @@
+---
+title: Configuration Reference
+---
+
 # Configuration Reference
 
-All valid keys for `agenttape.toml`.
+**Every valid key in `agenttape.toml`, its type, and its default.** Configuration is optional — every setting has a default. Place the file at your project root; it's discovered by walking up from the current directory.
+
+For the conceptual overview, see [Configuration](configuration.md).
 
 ---
 
-## What is it?
+## Complete example
 
-This page lists every available configuration option you can place in your `agenttape.toml` file.
+```toml title="agenttape.toml"
+cassette_dir = "tests/cassettes"
+default_mode = "none"
+default_matchers = ["ignore_volatile"]
+freeze = ["clock", "uuid", "random"]
+ignore_volatile_fields = ["timestamp", "request_id", "x-request-id", "date", "nonce"]
+assets_threshold_bytes = 4096
+format = "yaml"
+env_snapshot = ["MODEL_TIER", "FEATURE_FLAGS"]
+# model_override = "gpt-4o"
 
-The file should be placed in the root of your repository (next to `pyproject.toml` or `package.json`). AgentTape will automatically discover it.
+[redact]
+denylist = ["x-internal-token"]
+regexes = ["cust_[a-z0-9]{12}"]
+redact_emails = true
+# placeholder = "***REDACTED***"
+# enabled = true
+```
 
 ---
 
-## Global Options
+## Top-level keys
 
 ### `cassette_dir`
-*   **Type**: `str` (Path)
-*   **Default**: `"cassettes"`
-*   **Description**: The directory where AgentTape will read and write YAML files. If a relative path is provided, it is resolved relative to the location of the `agenttape.toml` file.
+- **Type:** `str` (path) · **Default:** `"cassettes"`
+- Where cassettes are read and written. Relative paths resolve relative to the **`agenttape.toml` file's** location, not the current directory.
 
 ### `default_mode`
-*   **Type**: `str`
-*   **Default**: `"none"`
-*   **Description**: The fallback mode if none is specified in `use_cassette`. Must be one of `"none"`, `"once"`, `"new_episodes"`, `"all"`, or `"record"`.
-
-### `format`
-*   **Type**: `str`
-*   **Default**: `"yaml"`
-*   **Description**: The serialization format for cassettes. Supported values are `"yaml"` and `"json"`. YAML is strongly recommended for human readability and Git diffing.
-
----
-
-## Determinism Options
-
-### `freeze`
-*   **Type**: `list[str]`
-*   **Default**: `["clock", "uuid", "random"]`
-*   **Description**: The non-deterministic subsystems to mock during recording and replay.
-
-### `env_snapshot`
-*   **Type**: `list[str]`
-*   **Default**: `[]`
-*   **Description**: A list of environment variable names to record into the cassette metadata. If these variables change during replay, AgentTape will emit a warning.
-
----
-
-## Matching Options
+- **Type:** `str` · **Default:** `"none"`
+- Fallback mode when `use_cassette` doesn't pass one. One of `none`, `once`, `new_episodes`, `all`, `record`. See [Cassette Modes](cassette-modes.md). An invalid value raises `ConfigError`.
 
 ### `default_matchers`
-*   **Type**: `list[str]`
-*   **Default**: `["ignore_volatile"]`
-*   **Description**: The list of matchers the Replay Engine uses to compare requests.
+- **Type:** `list[str]` · **Default:** `["ignore_volatile"]`
+- The matcher chain the [Replay Engine](replay-engine.md) uses. Built-ins: `ignore_volatile`, `exact`, `ordered` (alias `sequential`), `semantic_stub`.
 
-### `ignore_volatile_fields`
-*   **Type**: `list[str]`
-*   **Default**: `["Date", "X-Amz-Date", "trace_id", "x-request-id", ...]` (See `canonical.py` for full list).
-*   **Description**: The specific dictionary keys or HTTP headers that the `ignore_volatile` matcher should ignore when comparing requests. You can append your own custom dynamic headers here.
+### `format`
+- **Type:** `str` · **Default:** `"yaml"`
+- Serialization format: `"yaml"` or `"json"`. YAML is recommended for readability and Git diffs. An invalid value raises `ConfigError`.
+
+### `assets_threshold_bytes`
+- **Type:** `int` · **Default:** `4096`
+- Payloads larger than this are written to a sibling assets directory instead of being inlined into the cassette, keeping the YAML readable.
+
+### `model_override`
+- **Type:** `str` · **Default:** *unset*
+- Pins the model sent to the OpenAI adapter, for replay-with-a-different-model experiments. This **genuinely changes** the request (a real re-execution, not deterministic replay), so use it with [Partial Replay](mixed-replay.md).
 
 ---
 
-## Redaction Options
+## Determinism keys
 
-All redaction options must be placed under the `[redact]` table.
+### `freeze`
+- **Type:** `list[str]` · **Default:** `["clock", "uuid", "random"]`
+- Non-deterministic subsystems to pin during record and replay. See [Determinism](determinism.md).
 
-### `[redact]`
+### `env_snapshot`
+- **Type:** `list[str]` · **Default:** `[]`
+- Environment variable names to record into `meta.freeze.env`. If a value differs on replay, AgentTape emits a `DeterminismDriftWarning`.
+
+---
+
+## Matching keys
+
+### `ignore_volatile_fields`
+- **Type:** `list[str]` · **Default:** see below
+- Field/header names (case-insensitive) the `ignore_volatile` matcher drops before hashing a request. Add your own dynamic fields here.
+
+The built-in default list:
+
+```python
+["timestamp", "created", "created_at", "request_id", "x-request-id",
+ "x-amzn-requestid", "nonce", "trace_id", "traceparent", "date",
+ "user-agent", "idempotency-key"]
+```
+
+!!! note "Setting this replaces the default"
+    Providing `ignore_volatile_fields` overrides the built-in list rather than extending it. Include the defaults you still want, plus your additions.
+
+---
+
+## Redaction: the `[redact]` table
+
+These keys **add to** AgentTape's built-in redaction (denylisted keys + secret-pattern regexes + emails). See [Redaction](redaction.md).
 
 ```toml
 [redact]
-headers = ["Authorization"]
-secrets = ["sk-123"]
-env_secrets = ["STRIPE_KEY"]
-replacement = "[SCRUBBED]"
+denylist = ["x-internal-token", "ssn"]
+regexes = ["cust_[a-z0-9]{12}"]
+redact_emails = true
+placeholder = "***REDACTED***"
+enabled = true
 ```
 
-*   **`headers`** *(list[str])* - HTTP headers to completely redact.
-*   **`secrets`** *(list[str])* - Literal strings to search for and replace anywhere in the cassette.
-*   **`env_secrets`** *(list[str])* - Names of environment variables. AgentTape will read their current values and redact those strings from the cassette.
-*   **`replacement`** *(str, default="<REDACTED>")* - The string inserted in place of redacted data.
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `denylist` | `list[str]` | `[]` | Extra field/header names whose values are fully redacted (case-insensitive) |
+| `regexes` | `list[str]` | `[]` | Extra value patterns to scrub anywhere in strings |
+| `redact_emails` | `bool` | `true` | Redact email addresses |
+| `placeholder` | `str` | `***REDACTED***` | Replacement text for redacted values |
+| `enabled` | `bool` | `true` | Master switch for all redaction |
 
 ---
 
-## Performance Options
+## How the file is loaded
 
-### `assets_threshold_bytes`
-*   **Type**: `int`
-*   **Default**: `4096`
-*   **Description**: *Experimental.* If a tool returns a binary payload (like an image) larger than this threshold, AgentTape will save it as a separate file in an `assets/` directory rather than base64-encoding it directly into the YAML file, keeping the YAML readable.
+- Parsed with stdlib `tomllib` (Python 3.11+); on 3.10, with `tomli` if present, otherwise a tiny built-in fallback parser — so config support adds **zero** dependencies.
+- Discovered by walking up from the current directory, like `pyproject.toml`. The first `agenttape.toml` found wins.
+- Per-call arguments to `use_cassette(...)` always override file values.
+
+---
+
+## Summary
+
+- Top-level: `cassette_dir`, `default_mode`, `default_matchers`, `format`, `assets_threshold_bytes`, `model_override`.
+- Determinism: `freeze`, `env_snapshot`.
+- Matching: `ignore_volatile_fields` (replaces the default list when set).
+- `[redact]`: `denylist`, `regexes`, `redact_emails`, `placeholder`, `enabled` — additive to the built-ins.
+
+[Next: Cassette Format →](format.md){ .md-button .md-button--primary }

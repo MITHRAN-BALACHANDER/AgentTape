@@ -1,127 +1,185 @@
+---
+title: Your First Recording
+---
+
 # Your First Recording
 
-Learn how to record an LLM interaction and replay it offline.
+**A five-minute walkthrough: call an LLM, record it, then replay it offline — and edit the cassette to fake an answer.**
+
+By the end you'll understand the whole record → replay loop and be able to apply it to your own agent.
 
 ---
 
-## What is it?
+## Before you start
 
-This guide will walk you through writing a simple script that calls the OpenAI API, recording the interaction with AgentTape, and replaying it.
-
----
-
-## The Problem
-
-Imagine we have a simple function that asks an LLM for a random color.
-
-```python
-from openai import OpenAI
-
-def get_random_color():
-    client = OpenAI()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Name a random color. Reply with just one word."}]
-    )
-    return response.choices[0].message.content
-
-print(get_random_color())
+```bash
+pip install "agenttape[openai]"
+export OPENAI_API_KEY="sk-..."   # needed only for the recording step
 ```
 
-If we put this in a test, it will cost money every time it runs. It might return "Red" one time, and "Blue" the next. And if our CI server loses internet access, the test will fail.
-
 ---
 
-## Recording the Interaction
+## Step 1 — The code to test
 
-We can fix this by wrapping the function call in an AgentTape `use_cassette` context manager.
+Here's a function that asks an LLM for a color. Notice there is **nothing AgentTape-specific** about it — it's ordinary OpenAI code.
 
-```python
-import agenttape
+```python title="agent.py"
 from openai import OpenAI
 
-def get_random_color():
+def get_random_color() -> str:
     client = OpenAI()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Name a random color. Reply with just one word."}]
+        messages=[{"role": "user", "content": "Name a random color. One word."}],
     )
     return response.choices[0].message.content
+```
 
-# Set mode="record" to force a real network call and save the result.
-with agenttape.use_cassette("color_test", mode="record"):
+Run it directly and it costs money, returns a different word each time, and fails with no internet. Let's fix all three.
+
+---
+
+## Step 2 — Record
+
+Wrap the call in a `use_cassette` block with `mode="record"`.
+
+```python title="record.py" hl_lines="5"
+import agenttape
+from agent import get_random_color
+
+# mode="record" forces a real API call and saves the result.
+with agenttape.use_cassette("color", mode="record"):
     color = get_random_color()
     print(f"The LLM chose: {color}")
 ```
 
-### What happened?
+```bash
+python record.py
+# The LLM chose: Crimson
+```
 
-1.  AgentTape intercepted the `client.chat.completions.create` call.
-2.  It forwarded the request to the real OpenAI API.
-3.  It took the response (e.g., "Green") and saved both the prompt and the response into a new file at `cassettes/color_test.yaml`.
-4.  It returned the response to our function.
+!!! success "What happened?"
+    1. AgentTape intercepted `client.chat.completions.create`.
+    2. It forwarded the request to the real OpenAI API.
+    3. It saved the prompt **and** the response to a new file: `cassettes/color.yaml`.
+    4. It returned the response to your function.
 
 ---
 
-## Replaying the Interaction
+## Step 3 — Replay
 
-Now, let's change the mode to `none` (which means "replay only, no network").
+Now change one word: `mode="record"` → `mode="none"`. (`none` means "replay only, never touch the network".)
 
-```python
+```python title="replay.py" hl_lines="4"
 import agenttape
-from openai import OpenAI
+from agent import get_random_color
 
-def get_random_color():
-    client = OpenAI()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Name a random color. Reply with just one word."}]
-    )
-    return response.choices[0].message.content
-
-# Set mode="none" to block the network and use the saved cassette.
-with agenttape.use_cassette("color_test", mode="none"):
+with agenttape.use_cassette("color", mode="none"):
     color = get_random_color()
     print(f"The LLM chose: {color}")
 ```
 
-### What happened?
+```bash
+python replay.py
+# The LLM chose: Crimson   ← same answer, every time
+```
 
-1.  AgentTape intercepted the call.
-2.  It looked at the `cassettes/color_test.yaml` file.
-3.  It verified that the prompt matched the recorded prompt.
-4.  It immediately returned the saved response ("Green") without making a network request.
+!!! success "What happened?"
+    1. AgentTape intercepted the call.
+    2. It matched your prompt against `cassettes/color.yaml`.
+    3. It returned the saved response **without any network request**.
 
-If you run this script with `mode="none"`, it will execute in milliseconds. You can even turn off your Wi-Fi and it will still work perfectly.
+Try it with your Wi-Fi off and no `OPENAI_API_KEY`. It still works, and it runs in milliseconds.
 
 ---
 
-## Inspecting the Cassette
+## Step 4 — Look inside the cassette
 
-AgentTape cassettes are just plain text. If you open `cassettes/color_test.yaml`, you will see something like this:
+The cassette is plain YAML. Open `cassettes/color.yaml`:
 
-```yaml
+```yaml title="cassettes/color.yaml"
+version: '1'
+created_at: '2026-06-17T12:00:00.000000'
+run_id: bee71bc9-33b8-431b-8012-00a753783931
+meta:
+  agenttape_version: 0.1.5
+  mode: record
+  freeze:
+    features: [clock, random, uuid]
+    base_time: 1781706140.86
+    base_iso: '2026-06-17T12:00:00+00:00'
 interactions:
-  - kind: llm
+  - index: 0
+    kind: llm
+    boundary: llm
     request:
+      endpoint: chat.completions
       model: gpt-4o-mini
       messages:
         - role: user
-          content: Name a random color. Reply with just one word.
+          content: Name a random color. One word.
     response:
-      content: Green
+      # ... the full OpenAI response object (trimmed here for clarity) ...
+      choices:
+        - message:
+            role: assistant
+            content: Crimson
+    match_key: 'sha256:1ed923...'
+    usage: {prompt_tokens: 14, completion_tokens: 1, total_tokens: 15}
+    latency_ms: 812.4
 ```
 
-Because it's just text, you can edit it! Change "Green" to "Octarine" in the YAML file, run the replay script again, and watch your script output "The LLM chose: Octarine".
+The key fields:
+
+| Field | Meaning |
+| --- | --- |
+| `request` | What your code sent — used to match on replay |
+| `response` | What the provider returned — served back on replay |
+| `match_key` | A hash of the request; how AgentTape finds the right recording |
+| `usage` / `latency_ms` | Captured metrics (free to inspect with the CLI) |
+
+[Full schema reference →](format.md)
+
+---
+
+## Step 5 — Fake an answer by editing the file
+
+Because it's just text, you can change the recorded answer. Edit the `content` field:
+
+```yaml
+            content: Octarine
+```
+
+Run `python replay.py` again:
+
+```bash
+python replay.py
+# The LLM chose: Octarine
+```
+
+!!! tip "Why this is powerful"
+    You just changed your agent's input without prompting the model into it. This is how you test edge cases — malformed JSON, empty responses, rate-limit errors — deterministically and offline. See [Working Offline](working-offline.md#faking-errors).
+
+---
+
+## The mental model
+
+```mermaid
+flowchart LR
+    R["mode=&quot;record&quot;<br/>(once)"] -->|calls real API,<br/>writes YAML| C[(cassettes/color.yaml)]
+    C -->|served back| P["mode=&quot;none&quot;<br/>(every test run)"]
+    P -.->|never calls API| X[OpenAI]
+```
+
+Record rarely (when behavior intentionally changes). Replay constantly (every test, every CI run).
 
 ---
 
 ## Summary
 
-*   Use `agenttape.use_cassette("name", mode="record")` to capture real API traffic.
-*   Use `agenttape.use_cassette("name", mode="none")` to replay traffic offline.
-*   Cassettes are saved as readable, editable YAML files in the `cassettes/` directory.
+- Wrap any code in `use_cassette("name", mode="record")` to capture real traffic.
+- Switch to `mode="none"` to replay it offline, free, and deterministically.
+- Cassettes are readable YAML in `cassettes/` — inspect, diff, and hand-edit them.
+- Editing a recorded response is the easiest way to test edge cases.
 
----
-
-**Next Steps**: Move to the Getting Started section and see the [Quickstart](quickstart.md) for a concise reference.
+[Next: the Quickstart reference →](quickstart.md){ .md-button .md-button--primary }

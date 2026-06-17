@@ -1,91 +1,119 @@
+---
+title: Determinism
+---
+
 # Determinism
 
-Freezing time, randomness, and unique IDs.
+**Agents embed the current time, random UUIDs, and random choices into their prompts. If those change between record and replay, matching breaks. AgentTape's freeze layer pins them so replay reproduces the recorded run exactly.**
 
 ---
 
-## What is it?
+## The problem it solves
 
-Agents often rely on non-deterministic functions. They might inject the current time into a system prompt ("Today is Tuesday..."), generate UUIDs for request tracing, or use `random` to sample choices.
+Suppose your system prompt includes "Today is {date}". You record on Monday. On Tuesday the prompt says "Today is Tuesday", which no longer matches the recorded "Today is Monday" — and replay fails with an [`UnmatchedInteractionError`](debugging.md), even though your code didn't change.
 
-If these values change between the record phase and the replay phase, the Replay Engine will fail because the prompts no longer match.
+The same happens with `uuid4()` request IDs and `random`-driven sampling. Without help, you'd have to mock `time.time()` by hand in every test.
 
-AgentTape solves this with its **freeze layer**, which pins these non-deterministic sources to their recorded values.
-
----
-
-## Why it exists
-
-Without the freeze layer, you would have to write custom matchers to ignore every timestamp in every prompt, or you'd have to rewrite your application code to mock out `time.time()` manually during tests.
-
-AgentTape handles this automatically, guaranteeing that your agent executes with the exact same environmental state during replay as it did during recording.
-
----
-
-## How it Works
-
-When AgentTape starts a session, you can pass a list of subsystems to freeze. By default, it freezes `clock`, `uuid`, and `random`.
-
-```python
-# Default behavior:
-with agenttape.use_cassette("agent", freeze=["clock", "uuid", "random"]):
-    # ...
-
-# Disable all freezing:
-with agenttape.use_cassette("agent", freeze=[]):
-    # ...
+```mermaid
+flowchart LR
+    subgraph nofreeze["Without freeze"]
+        A1["prompt: Today is Monday"] -->|record| C1[(cassette)]
+        A2["prompt: Today is Tuesday"] -->|replay| C1
+        C1 --> X1[mismatch ❌]
+    end
+    subgraph freeze["With freeze"]
+        A3["clock pinned to Monday"] -->|record + replay| C3[(cassette)]
+        C3 --> X3[always matches ✅]
+    end
 ```
 
-### 1. `clock`
-AgentTape patches `time.time`, `time.monotonic`, and `datetime.now`/`utcnow`/`today`.
-When recording, it saves the start time to the cassette's `meta.freeze` block.
-When replaying, it forces all clock functions to start from that exact saved time. (Latency measurements using `time.perf_counter` remain unaffected).
+---
 
-### 2. `uuid`
-AgentTape intercepts `uuid.uuid4()`.
-During recording, it saves the sequence of generated UUIDs into the cassette.
-During replay, it yields that exact sequence of UUIDs back to your application.
+## What the freeze layer pins
 
-### 3. `random`
-AgentTape seeds Python's built-in `random` module (and `numpy`'s RNG, if installed) deterministically based on the cassette's metadata.
+By default AgentTape freezes three subsystems. While **recording** it captures their base values into the cassette's `meta.freeze`; while **replaying** it restores those exact values, so the run is byte-for-byte reproducible across machines.
+
+| Feature | What's pinned | What's *not* touched |
+| --- | --- | --- |
+| `clock` | `time.time`, `time.time_ns`, `datetime.now/utcnow/today`, `date.today` | `time.perf_counter`, `time.monotonic` (so latency stays real and `asyncio.sleep` works) |
+| `uuid` | `uuid.uuid4()` — replays the recorded sequence | other UUID versions |
+| `random` | `random.seed(...)` and NumPy's RNG (if NumPy is imported) | RNGs from other libraries |
+
+!!! info "Latency is always real"
+    AgentTape never freezes `perf_counter`, so the `latency_ms` recorded in your cassette reflects the real call duration. It also keeps async timers working — freezing the monotonic clock would make `await asyncio.sleep(...)` hang forever.
 
 ---
 
-## Environment Variables
+## Controlling the freeze
 
-Sometimes agents depend on environment variables (like a `FEATURE_FLAG` or `MODEL_TIER`). If these change, your agent might behave differently, causing replay to fail confusingly.
+Freezing is on by default (the default config enables all three features). Override it per session with `freeze=`:
 
-You can tell AgentTape to snapshot specific environment variables.
+```python
+# Default — clock, uuid, random all pinned
+with agenttape.use_cassette("agent"):
+    ...
 
-```toml
-# agenttape.toml
+# Pin only UUIDs
+with agenttape.use_cassette("agent", freeze=["uuid"]):
+    ...
+
+# Disable all freezing
+with agenttape.use_cassette("agent", freeze=[]):
+    ...
+```
+
+Or set the project default:
+
+```toml title="agenttape.toml"
+freeze = ["clock", "uuid", "random"]
+```
+
+---
+
+## Environment variables
+
+Agents sometimes branch on env vars (`MODEL_TIER`, a feature flag). If one changes between record and replay, your agent can take a different path and fail confusingly. Snapshot them so AgentTape warns you:
+
+```toml title="agenttape.toml"
 env_snapshot = ["MODEL_TIER", "FEATURE_FLAGS"]
 ```
 
-During recording, AgentTape saves the values of these variables to the cassette. During replay, if the current environment doesn't match the saved snapshot, AgentTape emits a `DeterminismDriftWarning` to alert you that your environment is misconfigured.
+During recording AgentTape saves their values. During replay, if the current value differs, it emits a [`DeterminismDriftWarning`](api.md#warnings) pointing at the exact variable — surfacing a silently-broken environment early instead of leaving you to debug a mysterious mismatch.
 
 ---
 
-## Important Considerations
+## The clock caveat (read this if you record against signed APIs)
 
-**Real API timestamps**: If you freeze the clock during recording, real API calls made by your application will also use that frozen time. If an external API requires a live, cryptographically signed timestamp (like AWS SigV4), freezing the clock will cause the real API call to fail during recording.
+!!! danger "Freezing the clock affects real calls made *during recording*"
+    While recording, the frozen clock is also what your application sees. If a real API requires a live, cryptographically signed timestamp (AWS SigV4, some OAuth flows), the frozen time can make the **real call fail during recording**.
 
-In these cases, you must exclude `clock` from the `freeze` list for that specific cassette:
+    Exclude `clock` for those cassettes:
 
-```python
-with agenttape.use_cassette("aws_agent", freeze=["uuid", "random"]):
-    pass
-```
+    ```python
+    with agenttape.use_cassette("aws_agent", freeze=["uuid", "random"]):
+        ...
+    ```
+
+---
+
+## FAQ
+
+??? question "I use a custom ID library, not `uuid4` — replay still drifts. Why?"
+    AgentTape only patches `uuid.uuid4`. If you generate IDs another way (e.g. `ulid`, `nanoid`), freeze them yourself with `unittest.mock.patch` alongside AgentTape, or add the field to [`ignore_volatile_fields`](configuration-ref.md) so matching ignores it.
+
+??? question "Where are the frozen values stored?"
+    In the cassette under `meta.freeze` — `base_time`, `base_iso`, `random_seed`, and the recorded `uuids`. That's why replay reproduces them identically on any machine.
+
+??? question "Does freezing affect recording modes too?"
+    Yes, by default. During recording the clock is pinned to "now" and that base is saved, so the agent observes the *same* clock value it will see on replay. Disable per-cassette with `freeze=[]` if a real call needs the live clock.
 
 ---
 
 ## Summary
 
-*   Agents use time, UUIDs, and randomness, which break replay matching.
-*   AgentTape automatically freezes these subsystems by default.
-*   The frozen states are saved in the cassette metadata.
-*   You can disable specific freezes if they interfere with real API authentication during recording.
+- The freeze layer pins time, UUIDs, and randomness so prompts that embed them still match.
+- It records the base values and restores them on replay — reproducible across machines.
+- `perf_counter`/`monotonic` are never frozen, so latency and async timers stay real.
+- Snapshot env vars to catch environment drift; exclude `clock` when recording against signed APIs.
 
----
-
-**Next Steps**: Learn how to unfreeze specific boundaries to test new code against old recordings in [Partial Replay](mixed-replay.md).
+[Next: Partial Replay →](mixed-replay.md){ .md-button .md-button--primary }

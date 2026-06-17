@@ -83,27 +83,42 @@ def _make_ref(data: bytes, encoding: str, preview: str, writes: dict[str, bytes]
     }
 
 
-def inline(obj: Any, assets_dir: Path) -> Any:
-    """Return a copy of ``obj`` with asset references resolved to their content."""
+def inline(obj: Any, assets_dir: Path, *, strict: bool = False) -> Any:
+    """Return a copy of ``obj`` with asset references resolved to their content.
+
+    With ``strict=True`` (used on the replay read path) a missing asset file raises
+    instead of silently degrading to its short preview — replaying truncated data
+    would be a silent-corruption bug. Tooling that only inspects a cassette can keep
+    the lenient default.
+    """
 
     if is_asset_ref(obj):
-        return _resolve_ref(obj, assets_dir)
+        return _resolve_ref(obj, assets_dir, strict)
     if is_bytes_ref(obj):
         return base64.b64decode(obj[BYTES_MARKER])
     if isinstance(obj, dict):
-        return {k: inline(v, assets_dir) for k, v in obj.items()}
+        return {k: inline(v, assets_dir, strict=strict) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [inline(v, assets_dir) for v in obj]
+        return [inline(v, assets_dir, strict=strict) for v in obj]
     return obj
 
 
-def _resolve_ref(ref: dict[str, Any], assets_dir: Path) -> Any:
+def _resolve_ref(ref: dict[str, Any], assets_dir: Path, strict: bool = False) -> Any:
     digest = str(ref[ASSET_MARKER])
     name = digest.replace("sha256:", "sha256-")
     path = assets_dir / name
     if not path.exists():
-        # Asset missing: fall back to the preview so replay still produces *something*
-        # recognisable rather than crashing. Validation flags this separately.
+        if strict:
+            from .errors import CassetteCorruptError
+
+            raise CassetteCorruptError(
+                f"Asset {digest} is referenced by the cassette but missing from "
+                f"{assets_dir}. The assets sidecar was not committed/copied alongside "
+                f"the cassette. Restore it or re-record; AgentTape will not replay a "
+                f"truncated preview as if it were the real payload."
+            )
+        # Lenient (tooling/inspection): fall back to the preview so the caller still
+        # gets something recognisable. Validation flags missing assets separately.
         return ref.get("preview", "")
     data = path.read_bytes()
     encoding = ref.get("encoding", "utf-8")

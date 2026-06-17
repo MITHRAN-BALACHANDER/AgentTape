@@ -26,13 +26,40 @@ import base64
 import functools
 import json
 import re
+import warnings
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode
 
+from ..errors import StreamingNotRecordedWarning, StreamingReplayError
 from ..recorder import active_session
 from .base import Adapter, RefCountedPatch
+
+_HTTP_STREAM_LIVE_MSG = (
+    "A streaming HTTP response is being passed through live and is NOT recorded by "
+    "AgentTape (a byte stream cannot be replayed deterministically). Record without "
+    "streaming if you want it served from the cassette."
+)
+_HTTP_STREAM_REPLAY_MSG = (
+    "A streaming HTTP request was made during offline replay. Streaming responses "
+    "cannot be reconstructed deterministically and AgentTape will not silently hit "
+    "the network. Re-record this call without streaming, or mark its boundary live."
+)
+
+
+def _guard_http_stream(session: Any, boundary: str) -> None:
+    """Permit a streaming pass-through only when the boundary would run for real.
+
+    In any offline-replay disposition this raises instead of silently reading from
+    the network — the same guarantee the OpenAI adapter enforces for token streams.
+    """
+
+    if session.engine.executes_for_real("http", boundary):
+        warnings.warn(_HTTP_STREAM_LIVE_MSG, StreamingNotRecordedWarning, stacklevel=3)
+        return
+    raise StreamingReplayError(_HTTP_STREAM_REPLAY_MSG)
+
 
 # Headers dropped from the *recorded request* (secret or volatile).
 _DROP_REQUEST_HEADERS = frozenset(
@@ -99,13 +126,95 @@ def _clean_headers(headers: Any) -> dict[str, str]:
     return out
 
 
-def _clean_response_headers(headers: Any) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for key, value in dict(headers).items():
-        if str(key).lower() in _DROP_RESPONSE_HEADERS:
+def _response_header_items(headers: Any) -> list[tuple[str, str]]:
+    """Yield every header line, preserving duplicates.
+
+    ``dict(headers)`` collapses repeated header names — fatal for ``Set-Cookie``,
+    which must never be comma-joined. httpx exposes ``multi_items()`` to keep them
+    separate; for mappings that already collapsed (requests/urllib3) we take what
+    we can get.
+    """
+
+    multi = getattr(headers, "multi_items", None)
+    if callable(multi):
+        return [(str(k), str(v)) for k, v in multi()]
+    try:
+        items = headers.items()
+    except AttributeError:
+        items = dict(headers).items()
+    return [(str(k), str(v)) for k, v in items]
+
+
+def _clean_response_headers(headers: Any) -> dict[str, Any]:
+    """Record response headers, accumulating repeated names into a list value.
+
+    Keeping repeats as a list (instead of collapsing) lets multiple ``Set-Cookie``
+    / ``Link`` / ``Vary`` headers round-trip, while a denylisted header name still
+    maps to a single key so redaction scrubs the whole value.
+    """
+
+    out: dict[str, Any] = {}
+    for key, value in _response_header_items(headers):
+        if key.lower() in _DROP_RESPONSE_HEADERS:
             continue
-        out[str(key)] = str(value)
+        if key in out:
+            if isinstance(out[key], list):
+                out[key].append(value)
+            else:
+                out[key] = [out[key], value]
+        else:
+            out[key] = value
     return out
+
+
+def _expand_header_pairs(headers: dict[str, Any]) -> list[tuple[str, str]]:
+    """Flatten a recorded header mapping (list values -> repeated pairs)."""
+
+    pairs: list[tuple[str, str]] = []
+    for key, value in headers.items():
+        if key.lower() in _DROP_RESPONSE_HEADERS:
+            continue
+        if isinstance(value, list):
+            pairs.extend((key, str(item)) for item in value)
+        else:
+            pairs.append((key, str(value)))
+    return pairs
+
+
+def _json_body_bytes(parsed: Any) -> bytes:
+    """Re-serialise a parsed JSON body. Must match what ``_encode_body`` compares to."""
+
+    return json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+
+
+def _pairs_to_form(pairs: list[tuple[str, str]]) -> dict[str, Any]:
+    """Build a form mapping, accumulating repeated keys into a list value.
+
+    A plain ``dict`` would drop duplicate keys (``scope=read&scope=write`` -> only
+    ``write``) and lose data. Keeping repeats as a list preserves them while still
+    exposing each key to redaction (denylisted form fields stay mapping keys).
+    """
+
+    form: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in form:
+            if isinstance(form[key], list):
+                form[key].append(value)
+            else:
+                form[key] = [form[key], value]
+        else:
+            form[key] = value
+    return form
+
+
+def _form_body_bytes(form: dict[str, Any]) -> bytes:
+    pairs: list[tuple[str, str]] = []
+    for key, value in form.items():
+        if isinstance(value, list):
+            pairs.extend((key, str(item)) for item in value)
+        else:
+            pairs.append((key, str(value)))
+    return urlencode(pairs).encode("utf-8")
 
 
 def _encode_body(content: bytes | None, content_type: str = "") -> dict[str, Any]:
@@ -114,6 +223,14 @@ def _encode_body(content: bytes | None, content_type: str = "") -> dict[str, Any
     JSON / form bodies become nested data (so redaction and matching see their
     fields); multipart bodies have their boundary normalised; everything else is
     UTF-8 text or, failing that, base64.
+
+    For JSON and form bodies a verbatim ``raw_b64`` copy of the wire bytes is added
+    **only when** re-serialising the structured form would not reproduce them
+    (different whitespace, key spacing, number formatting, ``NaN`` …). That makes
+    replay byte-faithful for consumers that read the raw body (signature/ETag
+    checks) while keeping the common case lean. The redactor drops ``raw_b64`` if
+    it had to scrub anything from the structured body, so secrets never survive in
+    the verbatim copy.
     """
 
     if not content:
@@ -125,14 +242,29 @@ def _encode_body(content: bytes | None, content_type: str = "") -> dict[str, Any
             content = content.replace(boundary.encode("utf-8", "ignore"), _FIXED_BOUNDARY.encode())
     elif "application/json" in ctype or ctype.endswith("+json"):
         try:
-            return {"json": json.loads(content.decode("utf-8"))}
+            parsed = json.loads(content.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             pass
+        else:
+            out: dict[str, Any] = {"json": parsed}
+            try:
+                faithful = _json_body_bytes(parsed) == content
+            except (TypeError, ValueError):
+                faithful = False
+            if not faithful:
+                out["raw_b64"] = base64.b64encode(content).decode("ascii")
+            return out
     elif "application/x-www-form-urlencoded" in ctype:
         try:
-            return {"form": dict(parse_qsl(content.decode("utf-8"), keep_blank_values=True))}
+            pairs = parse_qsl(content.decode("utf-8"), keep_blank_values=True)
         except UnicodeDecodeError:
             pass
+        else:
+            form = _pairs_to_form(pairs)
+            out = {"form": form}
+            if _form_body_bytes(form) != content:
+                out["raw_b64"] = base64.b64encode(content).decode("ascii")
+            return out
     try:
         return {"text": content.decode("utf-8")}
     except UnicodeDecodeError:
@@ -140,10 +272,13 @@ def _encode_body(content: bytes | None, content_type: str = "") -> dict[str, Any
 
 
 def _decode_body(payload: dict[str, Any]) -> bytes:
+    # A verbatim wire copy wins when present (and not stripped by redaction).
+    if "raw_b64" in payload:
+        return base64.b64decode(payload["raw_b64"])
     if "json" in payload:
-        return json.dumps(payload["json"], ensure_ascii=False).encode("utf-8")
+        return _json_body_bytes(payload["json"])
     if "form" in payload and isinstance(payload["form"], dict):
-        return urlencode(payload["form"]).encode("utf-8")
+        return _form_body_bytes(payload["form"])
     if "text" in payload:
         return str(payload["text"]).encode("utf-8")
     if "content" in payload:  # legacy cassettes
@@ -194,8 +329,11 @@ class HttpxAdapter(Adapter):
             session = active_session()
             if session is None:
                 return orig_sync(client, request, **kwargs)
+            boundary = _httpx_boundary(request.url)
+            if kwargs.get("stream"):
+                _guard_http_stream(session, boundary)
+                return orig_sync(client, request, **kwargs)
             req = _httpx_request(request)
-            boundary = request.url.host or "http"
 
             def executor() -> Any:
                 resp = orig_sync(client, request, **kwargs)
@@ -210,8 +348,11 @@ class HttpxAdapter(Adapter):
             session = active_session()
             if session is None:
                 return await orig_async(client, request, **kwargs)
+            boundary = _httpx_boundary(request.url)
+            if kwargs.get("stream"):
+                _guard_http_stream(session, boundary)
+                return await orig_async(client, request, **kwargs)
             req = _httpx_request(request)
-            boundary = request.url.host or "http"
 
             async def executor() -> Any:
                 resp = await orig_async(client, request, **kwargs)
@@ -269,11 +410,9 @@ def _httpx_dump(resp: Any) -> dict[str, Any]:
 
 
 def _httpx_build(httpx_mod: Any, payload: dict[str, Any], request: Any) -> Any:
-    headers = {
-        k: v
-        for k, v in payload.get("headers", {}).items()
-        if k.lower() not in _DROP_RESPONSE_HEADERS
-    }
+    # A list of pairs (not a dict) so repeated headers — multiple Set-Cookie above
+    # all — survive reconstruction; httpx parses them back into ``resp.cookies``.
+    headers = _expand_header_pairs(payload.get("headers", {}))
     extensions: dict[str, Any] = {}
     reason = payload.get("reason_phrase")
     if reason:
@@ -377,7 +516,17 @@ def _requests_build(requests_mod: Any, payload: dict[str, Any], request: Any) ->
     resp.status_code = int(payload.get("status_code", 200))
     content = _decode_body(payload)
     resp._content = content
-    resp.headers = requests_mod.structures.CaseInsensitiveDict(payload.get("headers", {}))
+    # requests' CaseInsensitiveDict holds one value per name; a recorded list value
+    # (repeated header) is comma-joined to mirror requests' own behaviour, while the
+    # individual Set-Cookie lines are also parsed into ``resp.cookies``.
+    flat: dict[str, str] = {}
+    set_cookies: list[str] = []
+    for key, value in payload.get("headers", {}).items():
+        values = value if isinstance(value, list) else [value]
+        if key.lower() == "set-cookie":
+            set_cookies.extend(str(v) for v in values)
+        flat[key] = ", ".join(str(v) for v in values)
+    resp.headers = requests_mod.structures.CaseInsensitiveDict(flat)
     resp.url = request.url
     resp.reason = payload.get("reason", "")
     resp.request = request
@@ -387,13 +536,46 @@ def _requests_build(requests_mod: Any, payload: dict[str, Any], request: Any) ->
     resp.raw = io.BytesIO(content)
     resp.elapsed = timedelta(0)
     resp.history = []
+    _populate_requests_cookies(resp, set_cookies)
     return resp
+
+
+def _populate_requests_cookies(resp: Any, set_cookies: list[str]) -> None:
+    """Parse recorded ``Set-Cookie`` lines back into ``resp.cookies``.
+
+    ``HTTPAdapter.build_response`` normally fills the cookie jar from the raw
+    urllib3 response; we rebuild it from the recorded headers so code reading
+    ``resp.cookies["session"]`` keeps working on replay.
+    """
+
+    if not set_cookies:
+        return
+    from http.cookies import SimpleCookie
+
+    for raw in set_cookies:
+        try:
+            jar = SimpleCookie()
+            jar.load(raw)
+            for name, morsel in jar.items():
+                resp.cookies.set(name, morsel.value)
+        except Exception:  # pragma: no cover - malformed/redacted cookie
+            continue
+
+
+def _httpx_boundary(url: Any) -> str:
+    host = url.host or "http"
+    scheme = url.scheme or "http"
+    port = url.port
+    return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
 
 
 def _host_of(url: str) -> str:
     try:
-        from urllib.parse import urlparse
+        from urllib.parse import urlsplit
 
-        return urlparse(url).hostname or "http"
+        parts = urlsplit(url)
+        host = parts.hostname or "http"
+        scheme = parts.scheme or "http"
+        return f"{scheme}://{host}:{parts.port}" if parts.port else f"{scheme}://{host}"
     except Exception:  # pragma: no cover
         return "http"

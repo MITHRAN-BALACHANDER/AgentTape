@@ -234,6 +234,20 @@ class OpenAIAdapter(Adapter):
             kind="embeddings",
             rehydrate=_rehydrate_embeddings,
         )
+        if not restores:
+            # We imported ``openai`` (available() is True) but found nothing to patch:
+            # the SDK's resource layout has changed. Fail loudly — silently leaving
+            # ``create`` unpatched would let calls hit the network during replay.
+            # (Calls still route through the always-on httpx fallback, but as raw
+            # ``http`` interactions, not structured ``llm`` ones.)
+            warnings.warn(
+                "AgentTape's OpenAI adapter found no patchable create() method on the "
+                "installed openai SDK; its resource layout may have changed. LLM calls "
+                "will be captured only via the raw-HTTP fallback. Upgrade AgentTape or "
+                "pin a compatible openai version.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return restores
 
     def _patch_target(

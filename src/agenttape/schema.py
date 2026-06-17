@@ -78,6 +78,12 @@ class Interaction:
         except (KeyError, TypeError, ValueError) as exc:
             raise CassetteCorruptError(f"Interaction missing required field: {exc}") from exc
         has_error = "error" in data and data["error"] is not None
+        if not has_error and "response" not in data:
+            raise CassetteCorruptError(
+                f"Interaction #{index} ({kind!r}) has neither a 'response' nor an "
+                f"'error'. A recorded interaction must carry one or the other; this "
+                f"cassette is corrupt or was hand-edited incorrectly."
+            )
         return cls(
             index=index,
             kind=kind,

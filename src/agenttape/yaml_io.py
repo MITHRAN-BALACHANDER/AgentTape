@@ -46,9 +46,19 @@ def using_pyyaml() -> bool:
 
 _PLAIN_SAFE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9 _./@+-]*$")
 # Strings that *look* like another YAML type must be quoted to stay strings.
+# This must be a superset of every implicit resolver the *loader* applies — in
+# particular PyYAML's YAML-1.1 resolvers for ISO dates/datetimes, sexagesimal
+# numbers, hex/octal and underscore-grouped integers. A string emitted unquoted
+# that the loader would coerce to a non-str (e.g. "2026-06-17" -> datetime.date)
+# would silently change type on round-trip, breaking deterministic replay.
 _AMBIGUOUS_RE = re.compile(
     r"^(?:true|false|yes|no|on|off|null|~|none"
-    r"|[+-]?\d+|[+-]?\d*\.\d+(?:[eE][+-]?\d+)?|[+-]?\d+[eE][+-]?\d+)$",
+    r"|[+-]?\d[\d_]*"  # ints (incl. YAML 1.1 underscore grouping)
+    r"|[+-]?\d*\.\d+(?:[eE][+-]?\d+)?|[+-]?\d+[eE][+-]?\d+"  # floats
+    r"|[+-]?0x[0-9A-Fa-f]+|[+-]?0o?[0-7]+"  # hex / octal
+    r"|\d{4}-\d\d?-\d\d?(?:[Tt ][0-9:.+\-Zz ]*)?"  # ISO date / datetime
+    r"|[+-]?\d[\d_]*(?::[0-5]?\d)+(?:\.\d+)?"  # sexagesimal int/float
+    r"|\.nan|\.inf|[+-]?\.inf)$",
     re.IGNORECASE,
 )
 
@@ -246,13 +256,48 @@ def _quote(text: str) -> str:
 
 
 def load(text: str) -> Any:
-    """Parse a YAML string into Python objects."""
+    """Parse a YAML string into Python objects.
+
+    When PyYAML is present we use it (robust against arbitrary hand edits) but via
+    a loader whose implicit **timestamp** resolver is removed. PyYAML's YAML-1.1
+    resolver otherwise turns a recorded *string* like ``"2026-06-17"`` into a
+    ``datetime.date`` — diverging from the dependency-free stdlib parser (which
+    keeps it a ``str``) and corrupting replayed values. Stripping that one resolver
+    makes both code paths agree: scalars stay strings unless explicitly typed.
+    """
 
     if _pyyaml_available():
         import yaml
 
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=_loader_class())
     return _StdlibParser(text).parse()
+
+
+_LOADER_CACHE: Any = None
+
+
+def _loader_class() -> Any:
+    """Return a cached ``SafeLoader`` subclass with the timestamp resolver removed."""
+
+    global _LOADER_CACHE
+    if _LOADER_CACHE is not None:
+        return _LOADER_CACHE
+    import yaml
+
+    class _NoTimestampLoader(yaml.SafeLoader):
+        pass
+
+    # Copy the resolver table, dropping only the implicit timestamp resolver, so
+    # every other inference (bool/int/float/null) is preserved exactly.
+    _NoTimestampLoader.yaml_implicit_resolvers = {
+        ch: [(tag, regexp) for tag, regexp in resolvers if tag != _TIMESTAMP_TAG]
+        for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    _LOADER_CACHE = _NoTimestampLoader
+    return _NoTimestampLoader
+
+
+_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
 
 
 class _StdlibParser:

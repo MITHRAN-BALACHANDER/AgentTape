@@ -10,7 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "agenttape"
-version = "0.1.0"
+version = "0.1.8"
 source = { editable = "." }
 
 [package.optional-dependencies]

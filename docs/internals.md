@@ -1,76 +1,118 @@
+---
+title: Internals
+---
+
 # Internals
 
-How AgentTape is built.
+**How AgentTape is built, for contributors and the curious. Everything funnels into one internal schema and one decision engine; adapters and helpers are thin translators around them.**
 
 ---
 
-## What is it?
+## The non-negotiable: zero core dependencies
 
-This page describes the internal architecture of the AgentTape core engine. It is intended for developers who want to contribute to the project or understand exactly how the record/replay mechanism works under the hood.
+The core engine has `dependencies = []`. It cannot rely on `requests`, `pydantic`, `pyyaml`, or even `typing_extensions` — it must run on a bare Python 3.10+ install.
 
----
+!!! abstract "Why"
+    AgentTape is a *testing* tool. If it forced, say, `pydantic>=2`, it would break any project still on `pydantic 1.x` — the very projects it's meant to test. Adding AgentTape must never cause a version conflict.
 
-## Zero Dependencies
+How that's achieved:
 
-The most important architectural constraint of AgentTape is that the core engine must have **zero external runtime dependencies**.
-
-It cannot rely on `requests`, `pydantic`, `pyyaml`, or even `typing_extensions`. It must run on a bare Python 3.10+ installation.
-
-### Why?
-AgentTape is a testing tool. If a user installs AgentTape into their environment, it should not cause version conflicts with the libraries they are actually trying to test. If AgentTape required `pydantic>=2.0`, it would break any project still using `pydantic 1.x`.
-
-### How?
-*   **YAML**: AgentTape includes a tiny, custom-written recursive block-YAML parser in `yaml_io.py`. It only supports the subset of YAML needed for cassettes. (Users can optionally install `PyYAML` for more robust parsing if they want).
-*   **TOML**: AgentTape uses the standard library `tomllib` in Python 3.11+, and includes a tiny fallback parser for 3.10.
-*   **Data Structures**: AgentTape uses standard `dataclasses` instead of `pydantic`.
+| Concern | Solution |
+| --- | --- |
+| YAML | A tiny custom block-YAML emitter/parser (`yaml_io.py`) covering just the cassette subset. PyYAML is optional and used if present. |
+| TOML | Stdlib `tomllib` on 3.11+, a tiny `_MiniToml` fallback on 3.10. |
+| Data model | Standard library `dataclasses`, not Pydantic. |
 
 ---
 
-## The Engine (`engine.py`)
+## The architecture at a glance
 
-The `Engine` class is the central nervous system.
-
-When you use `with agenttape.use_cassette(...)`, you are creating a new `Session`, which initializes a new `Engine`.
-
-The Engine is responsible for:
-1.  Loading the cassette from disk into memory.
-2.  Maintaining a pointer to the "current" interaction during replay.
-3.  Receiving `intercept()` calls from adapters and decorators.
-4.  Executing the matchers to decide if an intercept should replay or record.
-5.  Appending new interactions to the in-memory timeline.
-6.  Flushing the timeline back to disk when the session ends.
-
----
-
-## The Matchers (`matchers.py`)
-
-Matchers are pure functions. They take two dictionaries: the `recorded_request` and the `live_request`.
-
-They return a boolean indicating if they match, and if they don't, a list of string paths indicating exactly which fields differed.
-
-The default `ignore_volatile` matcher uses a hardcoded list (found in `canonical.py`) of keys to ignore during comparison, such as `Date`, `X-Amz-Date`, and `trace_id`.
+```mermaid
+flowchart TD
+    subgraph entry["Public API"]
+        UC[use_cassette] --> Sess
+        Dec["@replay / @record"] --> Sess
+        Tool["@tool / record_call"] -.->|active_session| Sess
+    end
+    Sess[Session] --> Eng[Engine]
+    Sess --> Frz[FreezeController]
+    Sess --> Ad[Adapters]
+    Eng --> Match[Matchers]
+    Eng --> Canon[canonical hashing]
+    Sess --> IO[Cassette I/O]
+    IO --> Red[Redactor]
+    IO --> Disk[(YAML on disk)]
+```
 
 ---
 
-## The Freeze Layer (`freeze.py`)
+## `Session` — the orchestrator
 
-The freeze layer works by dynamically patching standard library modules using `unittest.mock.patch`.
+`recorder.py`. A `Session` ties together the `Config`, the loaded `Cassette`, a `FreezeController`, an `Engine`, and the installed adapters. The public entry points (`use_cassette`, `@replay`, `@record`) are thin wrappers around it.
 
-*   **`clock`**: Patches `time.time()`. It maintains an internal offset counter. Every time `time.time()` is called during a recording, the counter increments slightly so time appears to move forward, but deterministically.
-*   **`uuid`**: Patches `uuid.uuid4()`.
-*   **`random`**: Calls `random.seed()` with a deterministic integer derived from the cassette metadata.
+A **ContextVar-based active-session stack** (`active_session()`) lets adapters and the `@tool` decorator find the current engine at call time without threading it through every call. ContextVar (not thread-local) is deliberate: each thread *and* each asyncio task gets an independent view, so two sessions opened concurrently in one event loop don't corrupt a shared stack.
 
-These patches are applied when the `Session` enters, and removed when the `Session` exits, ensuring no global state leaks between tests.
+- **On `__enter__`:** turn the freeze layer on, push onto the stack, install every available adapter.
+- **On `__exit__`:** uninstall adapters, pop the stack, restore the freeze layer, then `_maybe_write()` the cassette (only if the mode calls for it).
+
+---
+
+## `Engine` — the decision core & guardrail
+
+`engine.py`. Adapters and decorators call `engine.intercept(kind, request, boundary=, executor=)` (and `aintercept` for async). The engine decides **replay vs. execute** from `ModeFlags` plus the `live`/`frozen` sets, then either reconstructs the recorded response or runs `executor()` and records the result.
+
+Subtleties worth knowing:
+
+- **Re-entrancy depth** (a `ContextVar`): while an executor runs we're "inside" a boundary, so a nested interception (e.g. the httpx fallback firing during an OpenAI call the OpenAI adapter already wrapped) passes through instead of double-recording. The outermost boundary is captured. It's a ContextVar so concurrent async tasks each carry independent depth.
+- **`build_output()`** decides what's persisted per mode: `new_episodes` merges recorded + executed; `record`/`all`/`once` write only what executed; `none` with a live boundary writes the full served timeline (the *derived* cassette).
+- **`UnmatchedInteractionError`** is built with the closest recorded request and field-level diffs for a precise message.
+
+---
+
+## `Matchers` & `canonical`
+
+`matchers.py` + `canonical.py`. A matcher reduces a request to a comparison key; the engine indexes recordings by `(kind, boundary, key)`. Canonicalization drops volatile fields, recurses through nested structures, and renders to JSON with sorted keys and compact separators, then SHA-256 hashes it — so the key is identical across machines and Python versions. `ordered` matchers return a constant sentinel so matching falls through to call order.
+
+---
+
+## `FreezeController` — determinism
+
+`freeze.py`. Pins `clock`, `uuid`, and `random` (plus optional NumPy and an env snapshot). Base values live in `cassette.meta["freeze"]` so replay reproduces them everywhere.
+
+- The global callables (`time.time`, `datetime`, `uuid.uuid4`) are patched **once** via a reference-counted, lock-guarded installer; the patched functions **dispatch through the controller active in the current ContextVar**, so concurrent sessions don't stomp each other.
+- The frozen clock returns a **constant** `base_time` — it does not advance per call. `time.perf_counter` and `time.monotonic` are never frozen, so `latency_ms` stays real and async timers keep working.
+- Datetime freezing is "freezegun-lite": it swaps the real `datetime`/`date` classes in every already-imported module that holds a direct reference.
+
+---
+
+## The I/O pipeline (ordering matters)
+
+`cassette.py` + `yaml_io.py` + `assets.py` + `redaction.py`. Writing a cassette is deliberately ordered:
+
+```mermaid
+flowchart LR
+    A[Cassette object] --> B[to dict] --> C[redact] --> D[externalize<br/>large assets] --> E[serialize YAML/JSON] --> F[(disk)]
+```
+
+Redaction runs **before** anything is written, so secrets never touch the filesystem. Large binary payloads are offloaded to a sibling assets directory instead of being inlined.
+
+---
+
+## The three interception mechanisms
+
+A change usually belongs to exactly one of these — know which:
+
+1. **Transport adapters** (`adapters/`) — patch a library's client; the only mechanism that can *replay* a substituted response. OpenAI, httpx/requests fallback, LangGraph.
+2. **Boundary decorators** (`boundaries.py`) — `@tool`/`@retrieval`/`@memory_*` and low-level `record_call`. The "almost-no-code" way to make any function a recorded boundary.
+3. **`AgentTape` callback** (`callbacks.py`) — a duck-typed listener for frameworks that expose hooks (LangChain, LlamaIndex). Observational/record-only — it can't substitute a return value, so deterministic replay still relies on the transport adapters.
 
 ---
 
 ## Summary
 
-*   AgentTape has zero core dependencies to prevent version conflicts.
-*   It includes custom, minimal YAML and TOML parsers.
-*   The `Engine` manages state, matching, and I/O.
-*   The `Freeze` layer patches the standard library to guarantee determinism.
+- Zero core dependencies → custom YAML/TOML parsers, dataclasses over Pydantic.
+- `Session` orchestrates; `Engine` decides replay-vs-execute and is the side-effect guardrail.
+- ContextVars (active session, re-entrancy depth, freeze dispatch) make it concurrency-safe.
+- The write pipeline redacts before serializing, so secrets never reach disk.
 
----
-
-**Next Steps**: Read about how this architecture affects speed in [Performance](performance.md).
+[Next: Performance →](performance.md){ .md-button .md-button--primary }

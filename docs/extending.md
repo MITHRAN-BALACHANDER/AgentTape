@@ -1,77 +1,107 @@
+---
+title: Extending AgentTape
+---
+
 # Extending AgentTape
 
-How to build tools around the AgentTape ecosystem.
+**Cassettes are an open YAML format. Anything that reads them — analytics, dashboards, eval harnesses, observability pipelines — can be built without importing AgentTape at all.**
 
 ---
 
-## What is it?
+## Cassettes are just data
 
-AgentTape is not just a testing tool; it is a standard format for recording agent interactions. Because cassettes are structured YAML files, you can build entirely separate tools that read, analyze, or visualize them.
+To build on AgentTape, read the YAML directly. You don't need the library.
 
----
-
-## The Cassette Format
-
-If you want to build a tool that reads AgentTape recordings (for example, a custom web dashboard, an analytics script, or an evaluation framework), you should read the raw YAML files directly.
-
-You do not need to import the AgentTape Python library to read a cassette.
-
-### Example: Token Usage Analyzer
-
-Here is a simple script that parses a directory of cassettes to calculate total token usage across your test suite.
-
-```python
+```python title="Total token usage across a test suite"
 import yaml
 from pathlib import Path
 
-total_tokens = 0
-
+total = 0
 for file in Path("cassettes").glob("*.yaml"):
-    with open(file) as f:
-        cassette = yaml.safe_load(f)
-
+    cassette = yaml.safe_load(file.read_text())
     for interaction in cassette.get("interactions", []):
         if interaction.get("kind") == "llm":
-            # Adapters usually store token usage in a standardized metadata block
-            metrics = interaction.get("response", {}).get("metrics", {})
-            total_tokens += metrics.get("total_tokens", 0)
+            usage = interaction.get("usage") or {}
+            total += usage.get("total_tokens", 0)
 
-print(f"Total tokens used across all tests: {total_tokens}")
+print(f"Total tokens across all cassettes: {total}")
 ```
 
----
-
-## Integration with Evaluation Frameworks
-
-Evaluation frameworks (like LangSmith, Braintrust, or local scripts) need to run agents against hundreds of examples.
-
-If you run those evaluations against live APIs, it takes hours.
-
-If you wrap the evaluation run in `agenttape.use_cassette("eval_dataset", mode="none")`, the evaluation will run instantly. This allows you to evaluate *deterministic logic* (like how your agent routes tasks or uses tools) over a massive dataset without paying for LLM calls.
+!!! note "Usage lives at the interaction level"
+    Token usage is the interaction's top-level `usage` field (`{prompt_tokens, completion_tokens, total_tokens}`), not nested in the response. See the [cassette format](format.md).
 
 ---
 
-## Exporting to OpenTelemetry
+## Speed up evaluation loops
 
-*(Experimental)*
+Eval frameworks (LangSmith, Braintrust, home-grown scripts) run an agent over hundreds of examples. Against live APIs that's slow and expensive.
 
-AgentTape includes a CLI command to export cassettes into the OpenTelemetry (OTel) standard format.
+Wrap the eval run in a cassette and the *deterministic* parts — routing, tool selection, parsing — run instantly and free:
+
+```python
+import agenttape
+
+with agenttape.use_cassette("eval_dataset", mode="none"):
+    for example in dataset:
+        result = agent.run(example.input)
+        score(result, example.expected)
+```
+
+This is ideal for regression-testing agent **logic** over a large frozen dataset. To evaluate a *new* model against frozen tool outputs, combine it with [Partial Replay](mixed-replay.md) (`live={"llm"}`).
+
+---
+
+## Export to OpenTelemetry
+
+Turn an offline recording into a standard trace for any observability backend (Datadog, Honeycomb, Jaeger):
 
 ```bash
-agenttape export cassettes/hello.yaml --format otel > trace.json
+agenttape export cassettes/checkout.yaml --format otel -o trace.json
 ```
 
-This allows you to take an offline recording and import it into any standard observability platform (Datadog, Honeycomb, Jaeger) to visualize the agent's execution trace.
+The CLI also exports plain JSON (`--format json`) for tools that prefer it. See the [CLI reference](cli.md#export).
+
+---
+
+## Build a custom viewer
+
+AgentTape ships a self-contained HTML viewer (`agenttape view`), but the format is simple enough to render however you like — a web dashboard, a Slack unfurl, a PR comment bot. The contract you depend on:
+
+| You can rely on | Notes |
+| --- | --- |
+| `version` | Schema version (`"1"` today); check it for forward-compat |
+| `interactions[].kind` | One of `llm`, `tool`, `retrieval`, `memory_read`, `memory_write`, `http` |
+| `interactions[].request` / `response` / `error` | The captured payloads |
+| `interactions[].usage` / `latency_ms` | Metrics, when present |
+
+[Full schema →](format.md){ .md-button }
+
+---
+
+## Want to intercept a new library instead?
+
+If your goal is to *capture* a new SDK rather than *read* recordings, you want a transport adapter, not an external tool. See [Custom Adapters](adapters.md).
+
+---
+
+## FAQ
+
+??? question "Is the cassette format stable?"
+    The schema is versioned (`version: "1"`). Read `version` and treat unknown future versions defensively. Within a major version, fields are additive.
+
+??? question "Can I read cassettes in another language?"
+    Yes — it's plain YAML/JSON. Any language with a YAML parser can consume them.
+
+??? question "How do I total cost, not just tokens?"
+    Cost depends on per-model pricing AgentTape doesn't hardcode. Read `usage` and `meta.model` (or the request's `model`) and apply your own price table.
 
 ---
 
 ## Summary
 
-*   Cassettes are an open data format.
-*   You can parse them with standard YAML libraries in any language.
-*   They are ideal for speeding up local evaluation loops.
-*   They can be exported to OpenTelemetry for visualization.
+- Cassettes are open YAML — read them with any parser, no AgentTape import required.
+- Wrap eval runs in a cassette to test agent logic over big datasets instantly and free.
+- `agenttape export --format otel` turns a recording into a standard trace.
+- To capture a new SDK instead, write a [custom adapter](adapters.md).
 
----
-
-**Next Steps**: Check the complete [Python API Reference](api.md).
+[Next: Python API Reference →](api.md){ .md-button .md-button--primary }

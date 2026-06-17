@@ -77,6 +77,14 @@ class FreezeController:
                 _REAL_DATETIME.fromtimestamp(self._base_time, _dt.timezone.utc).isoformat(),
             )
         )
+        # The recorder's local UTC offset (seconds), stored so a frozen
+        # ``datetime.now()`` reproduces the recorder's *local* wall clock on any
+        # machine — matching real ``now()`` semantics while staying deterministic
+        # across timezones. (Replaying as UTC-naive would silently shift embedded
+        # timestamps by the recorder's offset.)
+        self._base_offset: int = int(
+            self.state.get("base_offset", _local_utc_offset(self._base_time))
+        )
         # Env bookkeeping.
         self._env_snapshot: dict[str, str] = dict(self.state.get("env", {}))
         # Lifecycle bookkeeping.
@@ -96,6 +104,7 @@ class FreezeController:
             self._base_iso = _REAL_DATETIME.fromtimestamp(
                 self._base_time, _dt.timezone.utc
             ).isoformat()
+            self._base_offset = _local_utc_offset(self._base_time)
         # Make this controller the one the patched globals dispatch through.
         self._token = _ACTIVE.set(self)
         if "clock" in self.features:
@@ -139,6 +148,7 @@ class FreezeController:
         if "clock" in self.features:
             data["base_time"] = self._base_time
             data["base_iso"] = self._base_iso
+            data["base_offset"] = self._base_offset
         if "random" in self.features:
             data["random_seed"] = self.random_seed
         if "uuid" in self.features:
@@ -151,6 +161,12 @@ class FreezeController:
 
     def _time(self) -> float:
         return self._base_time
+
+    def _local_moment(self) -> _dt.datetime:
+        """The frozen instant as a tz-aware datetime in the recorder's local zone."""
+
+        tz = _dt.timezone(_dt.timedelta(seconds=self._base_offset))
+        return _REAL_DATETIME.fromtimestamp(self._base_time, tz)
 
     # -- uuid -------------------------------------------------------------- #
 
@@ -246,7 +262,9 @@ class _FrozenDateTime(_REAL_DATETIME):
         fc = _active_clock()
         if fc is None:
             return _REAL_DATETIME.now(tz)
-        moment = _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc)
+        moment = fc._local_moment()
+        # Naive ``now()`` is local wall-clock (as real ``now()`` is); ``now(tz)``
+        # converts the same absolute instant into the requested zone.
         return moment.astimezone(tz) if tz is not None else moment.replace(tzinfo=None)
 
     @classmethod
@@ -261,7 +279,7 @@ class _FrozenDateTime(_REAL_DATETIME):
         fc = _active_clock()
         if fc is None:
             return _REAL_DATETIME.today()
-        return _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc).replace(tzinfo=None)
+        return fc._local_moment().replace(tzinfo=None)
 
 
 class _FrozenDate(_REAL_DATE):
@@ -272,7 +290,7 @@ class _FrozenDate(_REAL_DATE):
         fc = _active_clock()
         if fc is None:
             return _REAL_DATE.today()
-        return _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc).date()
+        return fc._local_moment().date()
 
 
 def _install_clock() -> None:
@@ -381,6 +399,16 @@ def _restorer(target: Any, name: str, original: Any) -> Callable[[], None]:
 
 def _read_env(whitelist: tuple[str, ...]) -> dict[str, str]:
     return {key: os.environ[key] for key in whitelist if key in os.environ}
+
+
+def _local_utc_offset(timestamp: float) -> int:
+    """Return the local UTC offset (whole seconds) at ``timestamp``."""
+
+    try:
+        offset = _REAL_DATETIME.fromtimestamp(timestamp).astimezone().utcoffset()
+    except (OverflowError, OSError, ValueError):  # pragma: no cover - extreme clocks
+        return 0
+    return int(offset.total_seconds()) if offset is not None else 0
 
 
 def default_features(config_freeze: tuple[str, ...], mode: str) -> set[str]:

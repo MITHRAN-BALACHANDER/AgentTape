@@ -1,84 +1,135 @@
+---
+title: Recording Tools
+---
+
 # Recording Tools
 
-A comprehensive guide to capturing tool executions.
+**A deeper guide to capturing tool executions: serialization rules, the boundary decorators, the low-level hook, and how tools behave under partial replay.**
+
+New to tools? Start with the [Tools concept page](tools.md). This guide covers the edge cases.
 
 ---
 
-## What is it?
+## The golden rule, restated
 
-We've covered the basics of tools in the Core Concepts section. This guide provides advanced patterns for recording tools, handling complex objects, and using semantic decorators.
-
----
-
-## The Golden Rule of Tools
-
-AgentTape must be able to serialize the inputs and outputs of your tools to YAML.
-
-If you pass a complex object (like a live database connection or a custom class instance) into a decorated tool, AgentTape will attempt to serialize it. If it cannot cleanly represent the object in YAML, it will fall back to a string representation (e.g., `<MyClass object at 0x1034>`).
-
-During replay, the Replay Engine will compare the string `<MyClass object at 0x1034>` against `<MyClass object at 0x8892>` and the match will fail.
-
-**Always pass and return simple, serializable primitives (strings, ints, lists, dicts) at the boundary.**
-
-### Bad
+AgentTape serializes a tool's arguments and return value to YAML. If it can't represent a value cleanly, it falls back to `str(value)` — and for most objects that includes a memory address that changes every run, which breaks matching on replay.
 
 ```python
-@agenttape.tool
-def get_user_status(db_conn: DatabaseConnection, user: UserObject) -> None:
-    # AgentTape cannot serialize db_conn or user reliably.
-    pass
+# str(db_conn) -> "<Connection object at 0x7f3a…>"   ← different every run
+# str(user)    -> "<User object at 0x55b2…>"          ← match fails on replay
 ```
 
-### Good
+So: **pass and return primitives at the boundary** — `str`, `int`, `float`, `bool`, `list`, `dict`, `None`.
 
-```python
-@agenttape.tool
-def get_user_status(user_id: int) -> str:
-    # The database connection is handled *inside* the tool, or globally.
-    # AgentTape only sees the integer and the string.
-    db_conn = get_global_db()
-    return db_conn.query_status(user_id)
-```
+=== " Don't"
+
+    ```python
+    @agenttape.tool
+    def get_user_status(db: Connection, user: User) -> None:
+        ...   # neither argument serializes stably
+    ```
+
+=== " Do"
+
+    ```python
+    @agenttape.tool
+    def get_user_status(user_id: int) -> str:
+        db = get_global_db()          # connection lives inside the boundary
+        return db.query_status(user_id)  # returns a plain string
+    ```
+
+!!! note "What AgentTape *can* serialize for you"
+    Beyond plain JSON types, the engine converts common scalars faithfully: `datetime`/`date` → ISO strings, `Decimal` → string, `UUID` → string, `Enum` → its value, `set` → sorted list, and Pydantic models via `model_dump()`. Cyclic graphs are broken with a `<cycle>` marker rather than overflowing. Binary `bytes` are preserved losslessly via the assets sidecar.
 
 ---
 
-## Tool Decorators
+## The four decorators
 
-AgentTape provides specific decorators to organize your cassettes semantically. They all function identically under the hood; they only change the `kind` label in the YAML file.
+All behave identically at runtime; they only set the `kind` label, which makes cassettes and [timelines](cli.md#timeline) readable and filterable.
 
-### `@agenttape.tool`
-The default decorator. Use this for general actions: sending emails, charging cards, using a calculator, making API calls.
-
-### `@agenttape.retrieval`
-Use this for functions that fetch documents for RAG applications. (See [Recording Vector Stores](recording-vector-stores.md)).
-
-### `@agenttape.memory_read` and `@agenttape.memory_write`
-Some agents have long-term memory systems (e.g., saving user preferences to a database between sessions). Use these decorators to explicitly mark when the agent is interacting with its memory state.
+| Decorator | `kind` | Use for |
+| --- | --- | --- |
+| `@agenttape.tool` | `tool` | Default: actions, APIs, payments, calculators |
+| `@agenttape.retrieval` | `retrieval` | RAG / search lookups |
+| `@agenttape.memory_read` | `memory_read` | Reading agent long-term memory |
+| `@agenttape.memory_write` | `memory_write` | Writing agent long-term memory |
 
 ```python
 @agenttape.memory_write
-def save_preference(user_id: str, key: str, value: str):
-    pass
+def save_preference(user_id: str, key: str, value: str) -> None:
+    preferences_db.set(user_id, key, value)
+
+@agenttape.tool(name="charge")   # override the recorded boundary name
+def charge_card(amount: int) -> dict:
+    ...
 ```
+
+Decorate an `async def` and it's awaited normally — sync and async are both supported.
 
 ---
 
-## Tools and Partial Replay
+## The low-level hook: `record_call`
 
-When using Partial Replay (`live={"llm"}`), your tools remain frozen.
+Sometimes you can't add a decorator — you're inside a framework, or you only have a call site. [`record_call`](api.md#record_call) routes a single boundary crossing through the active session with an explicit request payload.
 
-If your live LLM decides to call a tool with different arguments than it did during recording, AgentTape will instantly fail the test with an `UnmatchedInteractionError`.
+```python
+import agenttape
 
-For example, if the cassette expects `charge_card(amount=50)`, but the live LLM hallucinates and calls `charge_card(amount=500)`, AgentTape will **not** execute the tool. It blocks the call and fails the test. This is by design, ensuring partial replay never accidentally causes real-world damage.
+result = agenttape.record_call(
+    "tool",
+    {"name": "weather", "args": {"city": "London"}},
+    executor=lambda: weather_client.fetch("London"),
+    boundary="weather",
+)
+```
+
+Outside a session it just calls `executor()`. This is the same primitive the decorators and the [`AgentTape` callback](api.md#agenttape-callback-object) use under the hood.
+
+---
+
+## Tools under Partial Replay
+
+When you run with `live={"llm"}` ([Partial Replay](mixed-replay.md)), the LLM hits the real API but **tools stay frozen**. If the live model calls a tool with arguments that aren't in the cassette, AgentTape does **not** execute it — it raises [`UnmatchedInteractionError`](debugging.md).
+
+```mermaid
+flowchart TD
+    L[Live LLM decides:<br/>charge_card amount=500] --> M{Recorded with<br/>amount=500?}
+    M -->|no| E[Raise — real charge blocked]
+    M -->|yes| R[Serve recorded result]
+```
+
+A hallucinating model can't cause real-world damage during a partial-replay test. To intentionally allow a tool to run live, add it to the `live` set (`live={"llm", "charge_card"}`) — accepting the real side effect.
+
+---
+
+## Best practices
+
+!!! tip
+    - **Wrap only boundaries** (network/disk/DB/payment), never pure logic.
+    - **Return primitives**; convert models/cursors to dicts first.
+    - **Name tools explicitly** with `@tool(name=...)` if the function name is generic, so `live`/`frozen` tokens and cassettes are clear.
+    - **Keep boundaries atomic** — one side effect per decorated function.
+
+---
+
+## FAQ
+
+??? question "Can I wrap a third-party function I don't own?"
+    Yes: `wrapped = agenttape.tool(name="search")(third_party.search)` and call `wrapped(...)`. Or use `record_call` at the call site.
+
+??? question "Two tools have the same function name in different modules — will they collide?"
+    Recordings are keyed by `(kind, boundary, request)`. Give them distinct names via `@tool(name=...)` to keep `live`/`frozen` targeting and cassettes unambiguous.
+
+??? question "Does the decorator slow down production code?"
+    Outside a session it's a thin pass-through to the original function — negligible overhead. Interception only happens inside a `use_cassette` block.
 
 ---
 
 ## Summary
 
-*   Always pass serializable data types into decorated functions.
-*   Use semantic decorators (`retrieval`, `memory_read`) for better cassette organization.
-*   Tools are always blocked during replay, even if the LLM is running live, unless explicitly unfrozen.
+- Pass and return serializable primitives so matching stays stable.
+- `tool` / `retrieval` / `memory_read` / `memory_write` differ only in their `kind` label.
+- `record_call` is the low-level hook when you can't decorate.
+- Under partial replay, frozen tools never execute for real — unmatched calls fail loud.
 
----
-
-**Next Steps**: Learn how to use AgentTape to enable [Working Offline](working-offline.md).
+[Next: Working Offline →](working-offline.md){ .md-button .md-button--primary }

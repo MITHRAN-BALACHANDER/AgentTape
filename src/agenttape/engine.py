@@ -494,7 +494,15 @@ def _to_jsonable(obj: Any, _seen: frozenset[int] = frozenset()) -> Any:
         return [_to_jsonable(v, seen) for v in obj]
     if hasattr(obj, "model_dump"):
         try:
-            return _to_jsonable(obj.model_dump(), seen)
+            # mode="json" yields JSON-native primitives (datetimes -> ISO strings,
+            # enums -> values, UUID -> str) so nested rich types don't survive as
+            # Python objects that later corrupt on YAML round-trip; plain dump is the
+            # fallback for objects that reject the kwarg.
+            try:
+                dumped = obj.model_dump(mode="json")
+            except TypeError:
+                dumped = obj.model_dump()
+            return _to_jsonable(dumped, seen)
         except Exception:  # pragma: no cover
             pass
     if hasattr(obj, "to_dict"):
@@ -529,6 +537,28 @@ def _serialize_exception(exc: BaseException) -> dict[str, Any]:
             attrs[name] = value
     if attrs:
         data["attrs"] = attrs
+    # Capture an SDK-style HTTP error envelope so replayed errors keep their shape
+    # (e.g. ``except RateLimitError as e: e.body["error"]["code"]`` /
+    # ``e.response.headers["retry-after"]`` keep working offline). Redaction runs
+    # over the whole cassette afterwards, so any secret in these is scrubbed.
+    body = getattr(exc, "body", None)
+    if body is not None:
+        try:
+            data["body"] = _to_jsonable(body)
+        except Exception:  # pragma: no cover - defensive
+            pass
+    response = getattr(exc, "response", None)
+    if response is not None:
+        env: dict[str, Any] = {}
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            env["status_code"] = status
+        try:
+            env["headers"] = {str(k): str(v) for k, v in dict(response.headers).items()}
+        except Exception:  # pragma: no cover - non-mapping headers
+            pass
+        if env:
+            data["response"] = env
     return data
 
 
@@ -563,6 +593,22 @@ def _raise_recorded_error(error: dict[str, Any]) -> None:
                 setattr(exc, name, value)
             except Exception:  # pragma: no cover - read-only/slotted attributes
                 pass
+    # Rehydrate the SDK error envelope (best effort; a real httpx.Response cannot be
+    # reconstructed, so .response is an attribute-accessible Box stub).
+    body = error.get("body")
+    if body is not None:
+        try:
+            exc.body = body  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - slotted/read-only
+            pass
+    response = error.get("response")
+    if isinstance(response, dict):
+        from ._box import box
+
+        try:
+            exc.response = box(response)  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - slotted/read-only
+            pass
     raise exc
 
 

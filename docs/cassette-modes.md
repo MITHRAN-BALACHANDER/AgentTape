@@ -1,81 +1,143 @@
-# Cassette Modes
-
-Control how AgentTape reads and writes cassettes.
-
+---
+title: Cassette Modes
 ---
 
-## What is it?
+# Cassette Modes
 
-Cassette modes tell AgentTape how strict it should be about using recorded data versus hitting the real network.
-
-You set the mode when you start a session:
+**The mode is a single setting that decides — per request — whether AgentTape replays a recording or calls the real service.**
 
 ```python
 with agenttape.use_cassette("my_test", mode="none"):
-    # ...
+    ...
 ```
 
 ---
 
-## The Modes
+## The five modes
 
-AgentTape supports five modes.
+| Mode | If a recording exists | If the request is new | Network | Use it for |
+| --- | --- | --- | --- | --- |
+| **`none`** *(default)* | Replay it | **Raise** error | Off | CI, local tests |
+| **`once`** | Replay all | Record all *(only if file is absent)* | First run only | Writing a test the lazy way |
+| **`new_episodes`** | Replay it | Record & append it | New requests only | Incrementally growing a cassette |
+| **`all`** | Ignore it | Record fresh | Always | Re-recording from scratch |
+| **`record`** | *(alias of `all`)* | Record fresh | Always | Same as `all`, clearer intent |
 
-### 1. `none` (Default)
-
-**The safest mode. Perfect for CI and local tests.**
-
-*   **Behavior**: Replay only.
-*   **Rules**: If a request matches a recorded interaction, AgentTape returns it. If the request is new, or if the cassette file doesn't exist, AgentTape raises an error immediately.
-*   **Network**: Completely disabled.
-
-### 2. `once`
-
-**The lazy recording mode.**
-
-*   **Behavior**: Record if missing, replay if present.
-*   **Rules**: If the cassette file does not exist, AgentTape will record everything and save the file. If the file already exists, AgentTape will switch to `none` mode and act strictly as a replayer.
-*   **Network**: Enabled only on the very first run.
-
-### 3. `new_episodes`
-
-**The incremental recording mode.**
-
-*   **Behavior**: Replay knowns, record unknowns.
-*   **Rules**: If a request matches a recorded interaction, AgentTape returns it. If the request is new (e.g., your agent made a follow-up LLM call it didn't make before), AgentTape will hit the real network, append the new interaction to the cassette, and return the real result.
-*   **Network**: Enabled only for unmatched requests.
-
-### 4. `all`
-
-**The overwrite mode.**
-
-*   **Behavior**: Record everything, always.
-*   **Rules**: AgentTape completely ignores any existing cassette file. It forwards every request to the real network, and rewrites the cassette file from scratch.
-*   **Network**: Always enabled.
-
-### 5. `record`
-
-**An explicit alias for `all`.**
-
-*   **Behavior**: Identical to `all`. Use this when you want to be semantically clear that you are actively recording a new session.
+!!! info "Defaults"
+    `none` is the default everywhere — `use_cassette` with no mode, the `@replay` decorator, and the pytest plugin all default to offline replay. That's intentional: the safe, free, deterministic path should be the one you get for free.
 
 ---
 
-## Best Practices
+## How each mode behaves
 
-*   **Use `none` in CI**. This is the only way to guarantee your test suite won't break due to a network outage or cause an accidental side effect.
-*   **Use `once` or `new_episodes` when writing tests**. This allows you to build out a test suite incrementally without manually managing modes.
-*   **Use `record` when updating prompts**. If you change a prompt, the old recording is invalid. Run your test locally with `mode="record"` once to capture the new behavior, then switch back to `none`.
+=== "none"
+
+    **Strict replay. Never touches the network.**
+
+    - Matched request → returns the recording.
+    - New request, or missing cassette → raises [`UnmatchedInteractionError`](debugging.md) / `CassetteNotFoundError`.
+
+    This is the only mode that **guarantees** no network and no side effects. Use it in CI.
+
+=== "once"
+
+    **Record the first time, replay after that.**
+
+    - Cassette file absent → record everything and write the file.
+    - Cassette file present → behave exactly like `none` (strict replay).
+
+    Great for "write the test, run it once to capture, then it's frozen."
+
+=== "new_episodes"
+
+    **Replay what you know, record what you don't.**
+
+    - Matched request → replay it.
+    - New request (e.g. your agent made a follow-up call it didn't before) → hit the network, append it to the cassette, return the real result.
+
+    Use it when an agent's path is growing and you want to top up the cassette without re-recording everything.
+
+=== "all / record"
+
+    **Always record. Ignore any existing cassette.**
+
+    - Every request hits the network and the cassette is rewritten from scratch.
+    - `record` is a readable alias for `all`.
+
+    Use it to refresh a cassette after an intentional change.
+
+---
+
+## Choosing a mode
+
+```mermaid
+flowchart TD
+    Start{What are you doing?} --> CI[Running tests / CI]
+    Start --> New[Writing a new test]
+    Start --> Grow[Agent gained a new call]
+    Start --> Changed[Changed prompt/model on purpose]
+
+    CI --> N["mode=&quot;none&quot;"]
+    New --> O["mode=&quot;once&quot;"]
+    Grow --> NE["mode=&quot;new_episodes&quot;"]
+    Changed --> R["mode=&quot;record&quot;"]
+```
+
+---
+
+## Setting the mode
+
+=== "Per call"
+
+    ```python
+    with agenttape.use_cassette("checkout", mode="record"):
+        run_agent()
+    ```
+
+=== "Project default"
+
+    ```toml title="agenttape.toml"
+    default_mode = "none"
+    ```
+
+=== "In pytest"
+
+    ```bash
+    pytest                       # mode=none (default)
+    pytest --agenttape-record    # forces mode=all for marked tests
+    pytest --agenttape-mode once # override the mode for this run
+    ```
+
+---
+
+## Best practices
+
+!!! tip "Recommended workflow"
+    - **CI: always `none`.** It's the only way to guarantee no network and no side effects.
+    - **Writing tests: `once` or `new_episodes`.** Build the suite without juggling modes by hand.
+    - **Updating a prompt or model: `record` once, then back to `none`.** The old recording is invalid the moment you change the input.
+    - **Commit cassettes to Git.** They're the source of truth for how your agent behaved.
+
+---
+
+## FAQ
+
+??? question "What's the difference between `none` and `once` on an existing cassette?"
+    Nothing — when the cassette already exists, `once` behaves identically to `none` (strict replay). The difference is only on the **first** run, when `once` records and `none` raises.
+
+??? question "Will `new_episodes` ever overwrite an existing recording?"
+    No. It only *appends* new interactions. To replace existing recordings, use `all`/`record`.
+
+??? question "Does `record` mode also freeze the clock?"
+    By default, the freeze layer is on in `mode="none"` and off in recording modes — but AgentTape still pins the clock during recording so the agent observes the same time it will see on replay. See [Determinism](determinism.md).
 
 ---
 
 ## Summary
 
-*   `none`: strict replay, no network.
-*   `once`: record if file is missing, replay otherwise.
-*   `new_episodes`: replay matches, record new requests.
-*   `all` / `record`: ignore old file, record everything fresh.
+- `none` — strict replay, no network. **The default; use it in CI.**
+- `once` — record if the file is missing, otherwise replay.
+- `new_episodes` — replay matches, record & append new requests.
+- `all` / `record` — ignore the old file, record everything fresh.
 
----
-
-**Next Steps**: Learn how to globally configure AgentTape in [Configuration](configuration.md).
+[Next: Configuration →](configuration.md){ .md-button .md-button--primary }

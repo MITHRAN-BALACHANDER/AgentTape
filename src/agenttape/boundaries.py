@@ -23,6 +23,8 @@ F = TypeVar("F", bound=Callable[..., Any])
 def _normalize_args(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     """Bind call arguments to parameter names for a stable, matchable request."""
 
+    from .engine import _to_jsonable
+
     try:
         sig = inspect.signature(fn)
         bound = sig.bind_partial(*args, **kwargs)
@@ -36,9 +38,12 @@ def _normalize_args(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[
                 extra = data.pop(name)
                 if isinstance(extra, dict):
                     data.update(extra)
-        return data
+        # Reduce to JSON-able form so non-serialisable argument/default objects
+        # (DB handles, clients) become a stable string instead of crashing the YAML
+        # emitter or leaking raw object internals into the cassette.
+        return _to_jsonable(data)
     except (TypeError, ValueError):
-        return {"args": list(args), "kwargs": kwargs}
+        return _to_jsonable({"args": list(args), "kwargs": kwargs})
 
 
 def _make_boundary(kind: str) -> Callable[..., Any]:

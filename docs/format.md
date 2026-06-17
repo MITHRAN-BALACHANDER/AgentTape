@@ -1,138 +1,182 @@
+---
+title: Cassette Format
+---
+
 # Cassette Format
 
-The structure of the YAML files.
+**The exact schema of a cassette file — for building tools that read them and for hand-editing them safely. Schema `version` is `"1"`.**
 
 ---
 
-## What is it?
+## Root structure
 
-This page details the exact schema of an AgentTape cassette file.
-
-If you are building custom tools to parse cassettes, or if you need to hand-edit a cassette to fake a specific API response, this is the reference.
-
----
-
-## The Root Structure
-
-A cassette is a YAML document with exactly two top-level keys.
+A cassette has run metadata at the top level plus an ordered list of interactions.
 
 ```yaml
-meta: {}
-interactions: []
+version: '1'                  # schema version
+created_at: '2026-06-17T12:00:00.000000'
+run_id: bee71bc9-33b8-431b-8012-00a753783931
+meta: { ... }                 # about the session
+interactions: [ ... ]         # ordered boundary crossings
 ```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `version` | `str` | Schema version (`"1"`). Check it for forward-compat. |
+| `created_at` | `str` | ISO-8601 timestamp when the run started |
+| `run_id` | `str` | Unique id for this run |
+| `meta` | `map` | Session metadata (below) |
+| `interactions` | `list` | Ordered `Interaction` objects (below) |
+
+!!! note "Top-level, not nested"
+    `version`, `created_at`, and `run_id` live at the **root**, beside `meta` — not inside it.
 
 ---
 
 ## The `meta` block
 
-Contains information about the session as a whole.
-
 ```yaml
 meta:
-  version: 1
-  recorded_at: "2024-05-10T12:00:00.000000"
-  duration_ms: 1250.5
+  agenttape_version: 0.1.5
+  mode: record
   freeze:
-    clock: 1715342400.0
-    uuid:
-      - "550e8400-e29b-41d4-a716-446655440000"
-    random: 42
-  env:
-    MODEL_TIER: "production"
+    features: [clock, random, uuid]
+    base_time: 1781706140.86
+    base_iso: '2026-06-17T12:00:00+00:00'
+    random_seed: 0
+    uuids: ["550e8400-e29b-41d4-a716-446655440000"]
+    env: { MODEL_TIER: production }   # only if env_snapshot is set
+  tags: [smoke]                        # only if you passed tags=
 ```
 
-*   **`version`**: The schema version (currently `1`).
-*   **`recorded_at`**: ISO 8601 timestamp of when the recording started.
-*   **`duration_ms`**: Total execution time in milliseconds.
-*   **`freeze`**: The deterministic seeds used by the Freeze layer.
-*   **`env`**: The snapshotted environment variables (configured via `env_snapshot`).
+| Field | Description |
+| --- | --- |
+| `agenttape_version` | Version that recorded the cassette |
+| `mode` | Mode used to record |
+| `freeze` | Pinned determinism state, so replay reproduces it ([Determinism](determinism.md)) |
+| `freeze.env` | Snapshotted env vars (present only if `env_snapshot` is configured) |
+| `tags` | Labels passed via `tags=` |
 
 ---
 
-## The `interactions` list
-
-An ordered list of `Interaction` objects. Every HTTP call, LLM prompt, or tool execution is an interaction.
+## An `interaction`
 
 ```yaml
-interactions:
-  - kind: llm
-    boundary: openai.chat.completions.create
-    start_ms: 10.5
-    duration_ms: 800.0
-    request: {}
-    response: {}
+- index: 0
+  kind: tool
+  boundary: get_weather
+  request: { name: get_weather, args: { city: London } }
+  response: { temp: 15, condition: rainy }
+  match_key: 'sha256:1ed923…'
+  latency_ms: 88.0
+  usage: null
+  tags: []
 ```
 
-*   **`kind`**: The type of interaction. Standard values are `llm`, `http`, `tool`, `retrieval`, `memory_read`, `memory_write`.
-*   **`boundary`**: The specific name of the function or endpoint that was intercepted.
-*   **`start_ms`**: The time this interaction started, relative to the session start.
-*   **`duration_ms`**: How long the real interaction took.
-*   **`request`**: The inputs to the boundary.
-*   **`response`**: The outputs from the boundary.
+| Field | Type | Description |
+| --- | --- | --- |
+| `index` | `int` | 0-based position in the run |
+| `kind` | `str` | `llm`, `tool`, `retrieval`, `memory_read`, `memory_write`, `http` |
+| `boundary` | `str` | The specific name (tool function name, or `"llm"`, or the HTTP host) |
+| `request` | `map` | Inputs to the boundary — used for matching |
+| `response` | `any` | The output (**omitted** when `error` is present) |
+| `error` | `map` | A serialized exception (**omitted** when `response` is present) |
+| `match_key` | `str` | `sha256:` hash of the canonical request |
+| `latency_ms` | `float` | Real duration of the call |
+| `usage` | `map` | Token/usage metadata (LLM calls) |
+| `tags` | `list` | Optional labels |
+| `metadata` | `map` | Optional extra data |
 
 ---
 
-## The `request` and `response` objects
+## Request & response shapes by `kind`
 
-The shape of the `request` and `response` objects depends entirely on the `kind` of interaction.
+The shape of `request`/`response` depends on `kind`.
 
-### Tool Requests
+=== "tool / retrieval / memory"
 
-When a function is decorated with `@agenttape.tool`, AgentTape serializes its arguments into `args` and `kwargs`.
+    Arguments are bound to parameter names (not positional):
 
-```yaml
-  - kind: tool
-    boundary: my_custom_function
-    request:
-      args: ["user_123"]
-      kwargs:
-        force_refresh: true
-    response:
-      output: {"status": "active"}
-```
+    ```yaml
+    - kind: tool
+      boundary: my_function
+      request:
+        name: my_function
+        args: { user_id: "user_123", force_refresh: true }
+      response: { status: active }
+    ```
 
-### LLM Requests
+=== "llm"
 
-When an adapter intercepts an LLM call, it attempts to map the provider's specific API into a somewhat standardized shape, but the raw data is preserved.
+    The request is the model + messages + params; the response is the provider's full dumped object. Token usage is the interaction-level `usage` field.
 
-```yaml
-  - kind: llm
-    boundary: openai
-    request:
-      model: gpt-4o-mini
-      messages:
-        - role: user
-          content: Hello
-    response:
-      content: Hi there!
-      tool_calls: []
-      metrics:
-        total_tokens: 15
-```
+    ```yaml
+    - kind: llm
+      boundary: llm
+      request:
+        endpoint: chat.completions
+        model: gpt-4o-mini
+        messages:
+          - { role: user, content: Hello }
+      response:
+        choices:
+          - message: { role: assistant, content: Hi there! }
+      usage: { prompt_tokens: 9, completion_tokens: 3, total_tokens: 12 }
+    ```
 
-### HTTP Requests
+=== "http"
 
-If the universal HTTP adapter intercepts a raw network call, it saves standard HTTP semantics.
+    Captured by the raw httpx/requests fallback. Bodies are structured (`json`/`form`/`text`/`body_b64`); secret and volatile headers are dropped.
 
-```yaml
-  - kind: http
-    boundary: https://api.example.com/v1/data
-    request:
-      method: GET
-      headers:
-        Authorization: <REDACTED>
-      body: ""
-    response:
-      status: 200
-      headers:
-        Content-Type: application/json
-      body: '{"ok": true}'
-```
+    ```yaml
+    - kind: http
+      boundary: api.example.com
+      request:
+        method: GET
+        url: https://api.example.com/v1/data
+        headers: { Accept: application/json }
+      response:
+        status_code: 200
+        headers: { Content-Type: application/json }
+        json: { ok: true }
+    ```
+
+=== "error (any kind)"
+
+    When a boundary raised, `response` is replaced by `error`. On replay AgentTape re-raises it — as the real exception type when the class is importable.
+
+    ```yaml
+    - kind: tool
+      boundary: charge_card
+      request: { name: charge_card, args: { amount: 4200 } }
+      error:
+        type: TimeoutError
+        module: builtins
+        message: "payment gateway timed out"
+    ```
 
 ---
 
-## Editing Guidelines
+## Editing guidelines
 
-*   You can edit `response.content` (for LLMs) or `response.output` (for tools) freely to simulate edge cases.
-*   Do not edit `request` fields unless you also change the application code to match; otherwise, the Replay Engine will fail to match the interaction.
-*   Do not reorder the items in the `interactions` list unless your application code has also been updated to execute in that new order.
+Hand-editing is a supported workflow ([Working Offline](working-offline.md#faking-errors)). Follow these rules so you don't break matching:
+
+!!! tip "Safe to edit"
+    - **`response`** — change `content`, output values, status codes, etc. to simulate edge cases.
+    - **`error`** — add or change a serialized exception to test failure paths.
+    - **`usage`, `latency_ms`, `tags`** — purely informational.
+
+!!! warning "Edit with care"
+    - **`request` fields** change the `match_key`, so the recording won't match your code's call — unless you change the code to match too.
+    - **Order of `interactions`** matters when recordings share a match key (they're served in recorded order). Don't reorder unless your code's call order changed.
+
+---
+
+## Summary
+
+- Root keys: `version`, `created_at`, `run_id`, `meta`, `interactions`.
+- Each interaction has `kind`, `boundary`, `request`, and `response` **or** `error`, plus `match_key`/`latency_ms`/`usage`.
+- Request/response shapes vary by `kind` (tool, llm, http, error).
+- Edit responses and errors freely; changing requests breaks matching unless code changes too.
+
+[Back to the Introduction →](index.md){ .md-button }
