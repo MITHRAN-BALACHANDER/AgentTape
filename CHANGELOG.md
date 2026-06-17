@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `pytest --cov=agenttape` now measures the engine correctly (90%+, matching CI's
+  `coverage run`). The package `__init__` and the pytest entry-point plugin defer
+  their heavy imports (PEP 562 lazy loading) so the engine no longer loads — and
+  goes unmeasured — at plugin-registration time, before pytest-cov starts.
+- `AgentTape` callback now records the real prompt / tool input / retriever query
+  on the interaction (correlated by `run_id` from the matching `on_*_start`),
+  instead of a `<via-callback>` placeholder.
+- LangGraph adapter no longer wraps `Pregel.stream`: a streamed generator cannot be
+  captured as a single deterministic `memory_write` without exhausting the caller's
+  stream. `.invoke` is still checkpointed; LLM/tool calls inside `.stream` continue
+  to record/replay through the transport adapters.
+
+### Removed
+
+- Unused event constants and the `EVENTS` / `EVENT_TO_KIND` tables from
+  `agenttape.events` (only the five events the callback actually emits remain).
+
 ### Changed
 
 - Bumped optional/dev/docs dependency floors to current stable major lines while

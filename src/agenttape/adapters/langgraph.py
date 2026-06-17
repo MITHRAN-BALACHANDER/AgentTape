@@ -4,9 +4,15 @@ LangGraph runs a graph of nodes; LLM and tool calls inside nodes already flow
 through the OpenAI / httpx transport adapters (so they replay for free). This
 adapter adds the piece unique to LangGraph:
 
-* **Graph-state checkpoints** — each ``Pregel.invoke`` / ``.stream`` call is wrapped
-  and its result recorded as a ``memory_write`` interaction (boundary
-  ``graph_state``), enabling state/memory diffs between runs.
+* **Graph-state checkpoints** — each ``Pregel.invoke`` call is wrapped and its final
+  state recorded as a ``memory_write`` interaction (boundary ``graph_state``),
+  enabling state/memory diffs between runs.
+
+``Pregel.stream`` is intentionally **not** checkpointed: it yields a sequence of
+partial states through a generator, which cannot be captured as a single
+deterministic ``memory_write`` without exhausting the stream out from under the
+caller. ``.stream`` runs normally; the LLM/tool calls inside it still record and
+replay through the transport adapters, so determinism is preserved.
 
 The implementation is defensive: it adapts to the installed LangGraph version and
 never raises into user code. If the internal API differs, it degrades to capturing
@@ -51,7 +57,11 @@ class LangGraphAdapter(Adapter):
         return restores
 
     def _patch_pregel(self) -> list[Callable[[], None]]:
-        """Wrap ``Pregel.invoke`` / ``.stream`` to checkpoint state as memory_write."""
+        """Wrap ``Pregel.invoke`` to checkpoint final graph state as memory_write.
+
+        ``.stream`` is deliberately left untouched (see the module docstring): it
+        cannot be captured deterministically without consuming the caller's generator.
+        """
 
         try:
             from langgraph.pregel import Pregel  # type: ignore
@@ -59,7 +69,7 @@ class LangGraphAdapter(Adapter):
             return []
 
         restores: list[Callable[[], None]] = []
-        for method_name in ("invoke", "stream"):
+        for method_name in ("invoke",):
             original = getattr(Pregel, method_name, None)
             if original is None:
                 continue

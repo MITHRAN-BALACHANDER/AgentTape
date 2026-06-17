@@ -34,6 +34,9 @@ class AgentTape:
     def __init__(self, *, tag: str | None = None) -> None:
         self.tag = tag
         self._starts: dict[Any, float] = {}
+        # Requests captured at ``on_*_start`` time, keyed by run id, so the matching
+        # ``on_*_end`` can record the real prompt/input/query rather than a placeholder.
+        self._pending: dict[Any, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
 
     # -- generic event sink ------------------------------------------------ #
@@ -81,55 +84,66 @@ class AgentTape:
 
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id", id(prompts))
-        self._starts[run_id] = time.perf_counter()
+        self._begin(run_id, {"prompts": _jsonable(prompts)})
         self.emit(LLM_REQUEST, prompts=_jsonable(prompts))
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
-        latency = self._latency(run_id)
+        request = self._take_request(run_id, {"prompts": "<via-callback>"})
         self._record(
             "llm",
-            {"prompts": "<via-callback>"},
+            request,
             _jsonable(response),
             boundary="llm",
-            latency_ms=latency,
+            latency_ms=self._latency(run_id),
         )
 
     def on_tool_start(self, serialized: Any, input_str: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id", id(input_str))
-        self._starts[run_id] = time.perf_counter()
         name = (serialized or {}).get("name", "tool") if isinstance(serialized, dict) else "tool"
+        self._begin(run_id, {"name": name, "input": _jsonable(input_str)})
         self.emit(TOOL_START, name=name, input=_jsonable(input_str))
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
         name = kwargs.get("name", "tool")
-        latency = self._latency(run_id)
+        request = self._take_request(run_id, {"name": name})
         self._record(
             "tool",
-            {"name": name},
+            request,
             _jsonable(output),
-            boundary=name,
-            latency_ms=latency,
+            boundary=str(request.get("name", name)),
+            latency_ms=self._latency(run_id),
         )
 
     def on_retriever_start(self, serialized: Any, query: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id", id(query))
-        self._starts[run_id] = time.perf_counter()
+        self._begin(run_id, {"query": _jsonable(query)})
         self.emit(RETRIEVAL, query=_jsonable(query))
 
     def on_retriever_end(self, documents: Any, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
-        latency = self._latency(run_id)
+        request = self._take_request(run_id, {"query": "<via-callback>"})
         self._record(
             "retrieval",
-            {"query": "<via-callback>"},
+            request,
             _jsonable(documents),
             boundary="retrieval",
-            latency_ms=latency,
+            latency_ms=self._latency(run_id),
         )
 
     # -- helpers ----------------------------------------------------------- #
+
+    def _begin(self, run_id: Any, request: dict[str, Any]) -> None:
+        """Stash the start time and request payload for an in-flight boundary."""
+
+        self._starts[run_id] = time.perf_counter()
+        self._pending[run_id] = request
+
+    def _take_request(self, run_id: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+        """Return the request captured at start, or ``fallback`` if none was paired."""
+
+        return self._pending.pop(run_id, None) or fallback
 
     def _latency(self, run_id: Any) -> float | None:
         start = self._starts.pop(run_id, None)

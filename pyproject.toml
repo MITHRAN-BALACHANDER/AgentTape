@@ -152,6 +152,11 @@ markers = [
 branch = true
 source = ["agenttape"]
 omit = ["*/adapters/_scaffold_*.py"]
+# The package is imported by the pytest11 entry-point plugin before pytest-cov can
+# start measuring; the package __init__ and the plugin defer their heavy imports
+# (PEP 562 lazy loading) so the engine still measures correctly under `pytest --cov`.
+# This silences the residual, misleading warning for the few import-time lines left.
+disable_warnings = ["module-not-measured"]
 
 [tool.coverage.report]
 exclude_lines = [

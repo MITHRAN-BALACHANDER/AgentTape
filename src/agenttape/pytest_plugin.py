@@ -17,12 +17,15 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .config import Config
-from .diff import run_diff
-from .metrics import final_output
-from .recorder import Session
+if TYPE_CHECKING:
+    from .recorder import Session
+
+# Submodules are imported lazily inside the hook/fixture bodies (not at module top
+# level) so that pytest registering this entry-point plugin does not pull the engine
+# in before pytest-cov starts measuring — which would otherwise leave the engine's
+# import-time lines unmeasured under ``pytest --cov=agenttape``.
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -98,6 +101,7 @@ class CassetteHandle:
 
     @property
     def final_output(self) -> Any:
+        from .metrics import final_output
         from .schema import Cassette
 
         c = Cassette(interactions=list(self.session.engine.timeline))
@@ -118,6 +122,7 @@ class CassetteHandle:
     def assert_snapshot(self) -> None:
         """Fail with a readable diff if this run drifts from the recorded cassette."""
 
+        from .diff import run_diff
         from .schema import Cassette
 
         recorded = self.session.recorded
@@ -127,6 +132,9 @@ class CassetteHandle:
 
 
 def _make_session(request: Any) -> Session | None:
+    from .config import Config
+    from .recorder import Session
+
     marker = request.node.get_closest_marker("agenttape")
     if marker is None:
         return None
