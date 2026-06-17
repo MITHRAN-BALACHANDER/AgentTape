@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agenttape"
-version = "0.1.5"
+version = "0.1.8"
 description = "Deterministic record/replay of LLM and tool calls for AI agents, captured into human-readable cassettes."
 readme = "README.md"
 requires-python = ">=3.10"
