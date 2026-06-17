@@ -1,6 +1,28 @@
 # Quickstart
 
-## 30 seconds: record, then replay
+A rapid reference for integrating AgentTape into your project.
+
+---
+
+## What is it?
+
+This page provides the fastest path to getting AgentTape running in an existing codebase.
+
+---
+
+## 1. Install
+
+```bash
+pip install "agenttape[openai]"
+```
+
+*(Or replace `openai` with the adapter you need).*
+
+---
+
+## 2. Basic Usage (Context Manager)
+
+Wrap the code you want to record or replay in a `use_cassette` block.
 
 ```python
 import agenttape
@@ -13,54 +35,79 @@ def run_agent():
         messages=[{"role": "user", "content": "Say hi in 3 words"}],
     )
     return resp.choices[0].message.content
-
-# Record once — hits the real API, writes cassettes/hello.yaml (secrets redacted).
 with agenttape.use_cassette("hello", mode="record"):
     print(run_agent())
-
-# Replay forever — zero network calls, milliseconds, free, deterministic.
 with agenttape.use_cassette("hello", mode="none"):
-    print(run_agent())   # identical output, served from the cassette
+    print(run_agent())
 ```
 
-## As a decorator
+---
+
+## 3. Basic Usage (Decorator)
+
+You can also use AgentTape as a decorator. By default, the decorator uses `mode="none"`, which ensures your tests remain offline and deterministic.
 
 ```python
-@agenttape.replay("hello")          # mode="none" by default → offline + deterministic
+import agenttape
+
+@agenttape.replay("hello")
 def test_agent():
     assert "hi" in run_agent().lower()
 ```
 
-## Recording tools
+---
 
-Wrap any function that touches the outside world with `@agenttape.tool`. In replay
-it is served from the cassette and **never executes for real**:
+## 4. Recording Tools
+
+AgentTape doesn't just record LLM calls; it records the tools your agent uses.
+
+Wrap any function that touches the outside world with `@agenttape.tool`. During a recording, it executes normally. During replay, it returns the saved output and **never executes for real**.
 
 ```python
+import agenttape
+
 @agenttape.tool
 def charge_card(amount: int) -> dict:
-    return payment_api.charge(amount)   # real side effect — only in record mode
+    return payment_api.charge(amount) # Real side effect, skipped in replay!
 
 with agenttape.use_cassette("checkout", mode="none"):
-    charge_card(4200)   # returns the recorded result; no charge happens
+    charge_card(4200) # Returns recorded result instantly
 ```
 
-Other boundary decorators: `@agenttape.retrieval`, `@agenttape.memory_read`,
-`@agenttape.memory_write`. For frameworks that only expose callbacks, pass an
-`agenttape.AgentTape()` instance as a listener.
+Other decorators available for fine-grained semantic boundaries:
+*   `@agenttape.retrieval`
+*   `@agenttape.memory_read`
+*   `@agenttape.memory_write`
 
-## Cassette modes
+---
 
-| Mode | Behaviour |
-|------|-----------|
-| `none` | Replay only; error on any unmatched request. **Default in tests/CI.** |
-| `once` | Record if the cassette is absent, replay if present. |
-| `new_episodes` | Replay matches, record anything new. |
-| `all` | Always record, ignore existing recordings. |
-| `record` | Force record everything fresh. |
+## 5. Using pytest
 
-## Next
+If you use `pytest`, AgentTape provides a built-in plugin.
 
-- [Mixed / partial replay](mixed-replay.md) — the killer feature.
-- [pytest plugin](pytest.md) — offline tests by default.
-- [CLI](cli.md) — inspect, diff, timeline, view.
+```python
+import pytest
+
+@pytest.mark.agenttape("weather_agent")
+def test_weather(agenttape_cassette):
+    assert run_agent() == "It's sunny."
+```
+
+By default, the plugin runs tests offline (`mode="none"`). To record new cassettes, run pytest with the record flag:
+
+```bash
+pytest --agenttape-record
+```
+
+---
+
+## Summary
+
+* Use `with agenttape.use_cassette()` for targeted recording.
+* Use `@agenttape.replay()` to decorate test functions.
+* Use `@agenttape.tool` to mock out side effects automatically.
+* Use `@pytest.mark.agenttape` for seamless pytest integration.
+
+---
+
+**Next Steps**: Understand the mental model deeply in [Record vs Replay](record-vs-replay.md).
