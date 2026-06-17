@@ -55,18 +55,38 @@ plugins:
   - search
 
 nav:
-  - Home: index.md
-  - Quickstart: quickstart.md
-  - Guides:
-      - Mixed / partial replay: mixed-replay.md
-      - Determinism: determinism.md
-      - Replay with changes: replay-with-changes.md
-      - Redaction & secrets: redaction.md
-  - Reference:
-      - Cassette format: format.md
+  - Introduction:
+      - What is AgentTape?: index.md
+      - Why AgentTape?: why-agenttape.md
+      - Installation: installation.md
+      - Your First Recording: your-first-recording.md
+  - Getting Started:
+      - Quickstart: quickstart.md
+      - Record vs Replay: record-vs-replay.md
+      - Cassette Modes: cassette-modes.md
       - Configuration: configuration.md
+  - Core Concepts:
+      - Cassettes: cassettes.md
+      - Tools: tools.md
+      - Replay Engine: replay-engine.md
+      - Determinism: determinism.md
+      - Partial Replay: mixed-replay.md
+      - Redaction: redaction.md
+  - Guides:
+      - Testing AI Apps: testing-ai-apps.md
+      - Recording APIs: recording-apis.md
+      - Recording Databases: recording-databases.md
+      - Recording Vector Stores: recording-vector-stores.md
+      - Recording Tools: recording-tools.md
+      - Working Offline: working-offline.md
+      - Debugging: debugging.md
+  - Advanced:
+      - Custom Adapters: adapters.md
+      - Internals: internals.md
+      - Performance: performance.md
+      - Extending AgentTape: extending.md
+  - Reference:
+      - Python API: api.md
       - CLI: cli.md
-      - pytest plugin: pytest.md
-  - Extending:
-      - Writing an adapter: adapters.md
-  - Cookbook: cookbook.md
+      - Configuration: configuration-ref.md
+      - Cassette Format: format.md
