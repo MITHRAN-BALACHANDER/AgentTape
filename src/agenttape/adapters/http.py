@@ -5,14 +5,31 @@ ones AgentTape has no dedicated adapter for — is captured and replayed. Matchi
 based on method + URL + body plus non-volatile headers; secret and volatile headers
 (``Authorization``, ``Cookie``, ``User-Agent`` …) are dropped from the recorded
 request so they neither leak to disk nor destabilise matching.
+
+Two correctness rules drive the body/header handling:
+
+* The recorded body is the **decoded** payload (httpx/requests transparently
+  decompress on read), so the transport headers that describe the *wire* encoding
+  (``Content-Encoding``, ``Content-Length``, ``Transfer-Encoding``) are dropped from
+  the recorded response — keeping them would make the framework try to gunzip an
+  already-decompressed body on replay and raise ``DecodingError``.
+* JSON and form bodies are captured **structurally** (not as one opaque string) so
+  record-time redaction can see nested secret keys (``password`` in a login POST,
+  ``access_token`` in a token response) and so matching is stable across key
+  reordering / whitespace. Multipart bodies have their random boundary normalised so
+  repeated uploads match on replay.
 """
 
 from __future__ import annotations
 
 import base64
 import functools
+import json
+import re
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 from ..recorder import active_session
 from .base import Adapter, RefCountedPatch
@@ -39,9 +56,34 @@ _DROP_REQUEST_HEADERS = frozenset(
         "x-stainless-runtime-version",
         "x-stainless-package-version",
         "x-stainless-lang",
+        "x-stainless-retry-count",
+        "idempotency-key",
         "traceparent",
     }
 )
+
+# Transport headers describing the *wire* form of the body. The recorded body is the
+# decoded payload, so these must not survive into the reconstructed response.
+_DROP_RESPONSE_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+# A multipart boundary is random per request; normalise it so repeated uploads match.
+_BOUNDARY_RE = re.compile(r'boundary=("?)([^";,]+)\1', re.IGNORECASE)
+_FIXED_BOUNDARY = "AGENTTAPE_BOUNDARY"
+
+
+def _content_type(headers: Any) -> str:
+    try:
+        items = headers.items()
+    except AttributeError:
+        items = dict(headers).items()
+    for key, value in items:
+        if str(key).lower() == "content-type":
+            return str(value)
+    return ""
+
+
+def _normalize_boundary_in_header(value: str) -> str:
+    return _BOUNDARY_RE.sub(f"boundary={_FIXED_BOUNDARY}", value)
 
 
 def _clean_headers(headers: Any) -> dict[str, str]:
@@ -53,13 +95,44 @@ def _clean_headers(headers: Any) -> dict[str, str]:
     for key, value in items:
         if str(key).lower() in _DROP_REQUEST_HEADERS:
             continue
+        out[str(key)] = _normalize_boundary_in_header(str(value))
+    return out
+
+
+def _clean_response_headers(headers: Any) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in dict(headers).items():
+        if str(key).lower() in _DROP_RESPONSE_HEADERS:
+            continue
         out[str(key)] = str(value)
     return out
 
 
-def _encode_body(content: bytes | None) -> dict[str, Any]:
+def _encode_body(content: bytes | None, content_type: str = "") -> dict[str, Any]:
+    """Capture a request/response body, structured where possible.
+
+    JSON / form bodies become nested data (so redaction and matching see their
+    fields); multipart bodies have their boundary normalised; everything else is
+    UTF-8 text or, failing that, base64.
+    """
+
     if not content:
         return {}
+    ctype = content_type.lower()
+    if "multipart/form-data" in ctype:
+        boundary = _extract_boundary(content_type)
+        if boundary:
+            content = content.replace(boundary.encode("utf-8", "ignore"), _FIXED_BOUNDARY.encode())
+    elif "application/json" in ctype or ctype.endswith("+json"):
+        try:
+            return {"json": json.loads(content.decode("utf-8"))}
+        except (ValueError, UnicodeDecodeError):
+            pass
+    elif "application/x-www-form-urlencoded" in ctype:
+        try:
+            return {"form": dict(parse_qsl(content.decode("utf-8"), keep_blank_values=True))}
+        except UnicodeDecodeError:
+            pass
     try:
         return {"text": content.decode("utf-8")}
     except UnicodeDecodeError:
@@ -67,13 +140,22 @@ def _encode_body(content: bytes | None) -> dict[str, Any]:
 
 
 def _decode_body(payload: dict[str, Any]) -> bytes:
+    if "json" in payload:
+        return json.dumps(payload["json"], ensure_ascii=False).encode("utf-8")
+    if "form" in payload and isinstance(payload["form"], dict):
+        return urlencode(payload["form"]).encode("utf-8")
     if "text" in payload:
         return str(payload["text"]).encode("utf-8")
-    if "content" in payload:
+    if "content" in payload:  # legacy cassettes
         return str(payload["content"]).encode("utf-8")
     if "body_b64" in payload:
         return base64.b64decode(payload["body_b64"])
     return b""
+
+
+def _extract_boundary(content_type: str) -> str | None:
+    match = _BOUNDARY_RE.search(content_type or "")
+    return match.group(2) if match else None
 
 
 # --------------------------------------------------------------------------- #
@@ -148,31 +230,68 @@ class HttpxAdapter(Adapter):
         return restores
 
 
+def _httpx_request_body(request: Any) -> bytes:
+    # ``request.content`` raises ``RequestNotRead`` for streaming bodies (e.g. the
+    # multipart upload httpx builds lazily), so materialise it first when needed.
+    try:
+        content = request.content
+    except Exception:
+        try:
+            request.read()
+            content = request.content
+        except Exception:  # pragma: no cover - genuinely async-only streams
+            content = b""
+    return bytes(content) if content else b""
+
+
 def _httpx_request(request: Any) -> dict[str, Any]:
-    body = bytes(request.content) if request.content else b""
+    body = _httpx_request_body(request)
     return {
         "method": request.method,
         "url": str(request.url),
         "headers": _clean_headers(request.headers),
-        **_encode_body(body),
+        **_encode_body(body, _content_type(request.headers)),
     }
 
 
 def _httpx_dump(resp: Any) -> dict[str, Any]:
+    extensions = getattr(resp, "extensions", {}) or {}
+    http_version = extensions.get("http_version")
+    if isinstance(http_version, bytes):
+        http_version = http_version.decode("ascii", "replace")
     return {
         "status_code": resp.status_code,
-        "headers": dict(resp.headers),
-        **_encode_body(resp.content),
+        "headers": _clean_response_headers(resp.headers),
+        "reason_phrase": getattr(resp, "reason_phrase", ""),
+        "http_version": http_version or "HTTP/1.1",
+        **_encode_body(resp.content, _content_type(resp.headers)),
     }
 
 
 def _httpx_build(httpx_mod: Any, payload: dict[str, Any], request: Any) -> Any:
-    return httpx_mod.Response(
+    headers = {
+        k: v
+        for k, v in payload.get("headers", {}).items()
+        if k.lower() not in _DROP_RESPONSE_HEADERS
+    }
+    extensions: dict[str, Any] = {}
+    reason = payload.get("reason_phrase")
+    if reason:
+        extensions["reason_phrase"] = str(reason).encode("ascii", "replace")
+    http_version = payload.get("http_version")
+    if http_version:
+        extensions["http_version"] = str(http_version).encode("ascii", "replace")
+    resp = httpx_mod.Response(
         status_code=int(payload.get("status_code", 200)),
-        headers=payload.get("headers", {}),
+        headers=headers,
         content=_decode_body(payload),
         request=request,
+        extensions=extensions or None,
     )
+    # ``.elapsed`` raises if never set by a real transport; latency lives on the
+    # interaction, so a zero delta is enough to keep callers from crashing on replay.
+    resp.elapsed = timedelta(0)
+    return resp
 
 
 # --------------------------------------------------------------------------- #
@@ -236,27 +355,38 @@ def _requests_request(request: Any) -> dict[str, Any]:
         "method": request.method,
         "url": request.url,
         "headers": _clean_headers(request.headers),
-        **_encode_body(body_bytes),
+        **_encode_body(body_bytes, _content_type(request.headers)),
     }
 
 
 def _requests_dump(resp: Any) -> dict[str, Any]:
     return {
         "status_code": resp.status_code,
-        "headers": dict(resp.headers),
+        "headers": _clean_response_headers(resp.headers),
         "reason": getattr(resp, "reason", ""),
-        **_encode_body(resp.content),
+        **_encode_body(resp.content, _content_type(resp.headers)),
     }
 
 
 def _requests_build(requests_mod: Any, payload: dict[str, Any], request: Any) -> Any:
+    import io
+
+    from requests.utils import get_encoding_from_headers
+
     resp = requests_mod.models.Response()
     resp.status_code = int(payload.get("status_code", 200))
-    resp._content = _decode_body(payload)
+    content = _decode_body(payload)
+    resp._content = content
     resp.headers = requests_mod.structures.CaseInsensitiveDict(payload.get("headers", {}))
     resp.url = request.url
     resp.reason = payload.get("reason", "")
     resp.request = request
+    # Reconstruct the fields ``HTTPAdapter.build_response`` would normally set, so
+    # ``.text`` decodes correctly, ``.raw`` is iterable and ``.elapsed`` is present.
+    resp.encoding = get_encoding_from_headers(resp.headers)
+    resp.raw = io.BytesIO(content)
+    resp.elapsed = timedelta(0)
+    resp.history = []
     return resp
 
 

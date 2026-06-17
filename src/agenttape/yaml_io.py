@@ -99,8 +99,11 @@ def _emit_pair(key: str, value: Any, indent: int, lines: list[str]) -> None:
             for item in value:
                 _emit_item(item, indent + 1, lines)
     elif isinstance(value, str) and "\n" in value:
-        lines.append(f"{pad}{key_str}: {_block_header(value)}")
-        _emit_block_scalar(value, indent + 1, lines)
+        if _use_block(value):
+            lines.append(f"{pad}{key_str}: {_block_header(value)}")
+            _emit_block_scalar(value, indent + 1, lines)
+        else:
+            lines.append(f"{pad}{key_str}: {_quote_double(value)}")
     else:
         lines.append(f"{pad}{key_str}: {_scalar(value)}")
 
@@ -131,10 +134,37 @@ def _emit_item(item: Any, indent: int, lines: list[str]) -> None:
         stash2[0] = f"{pad}- {stash2[0].lstrip()}"
         lines.extend(stash2)
     elif isinstance(item, str) and "\n" in item:
-        lines.append(f"{pad}- {_block_header(item)}")
-        _emit_block_scalar(item, indent + 1, lines)
+        if _use_block(item):
+            lines.append(f"{pad}- {_block_header(item)}")
+            _emit_block_scalar(item, indent + 1, lines)
+        else:
+            lines.append(f"{pad}- {_quote_double(item)}")
     else:
         lines.append(f"{pad}- {_scalar(item)}")
+
+
+def _use_block(value: str) -> str | bool:
+    """Return True if ``value`` round-trips losslessly as a literal block scalar.
+
+    Literal blocks are diff-friendly but cannot faithfully represent every string:
+    ``|`` (clip) and ``|-`` (strip) only encode 0 or 1 trailing newline, a leading
+    blank line is ambiguous to re-read, and trailing whitespace on a content line is
+    fragile. Such strings are emitted as a double-quoted scalar instead, which is
+    always reversible.
+    """
+
+    if "\n" not in value or "\r" in value:
+        return False
+    if value.endswith("\n\n") or value.startswith("\n"):
+        return False
+    body = value[:-1] if value.endswith("\n") else value
+    first, *_ = body.split("\n")
+    # The first line sets the block's indentation; if it is itself indented, later,
+    # less-indented lines become a parse error (PyYAML rejects it). Require a flush
+    # first line and no trailing whitespace anywhere.
+    if first[:1] in (" ", "\t"):
+        return False
+    return all(line == line.rstrip(" \t") for line in body.split("\n"))
 
 
 def _block_header(value: str) -> str:
@@ -142,6 +172,29 @@ def _block_header(value: str) -> str:
     if value.endswith("\n"):
         return "|"  # clip: single trailing newline preserved
     return "|-"  # strip: no trailing newline
+
+
+def _quote_double(text: str) -> str:
+    """Double-quoted scalar with escapes — a single-line, always-reversible fallback."""
+
+    out: list[str] = ['"']
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
 
 
 def _emit_block_scalar(value: str, indent: int, lines: list[str]) -> None:
@@ -358,26 +411,32 @@ class _StdlibParser:
         self, idx: int, parent_indent: int, spec: tuple[str, str]
     ) -> tuple[str, int]:
         style, chomp = spec
-        collected: list[str] = []
-        block_indent: int | None = None
+        raw: list[str] = []
         while idx < self._n:
             line = self._lines[idx]
             if line.strip() == "":
-                collected.append("")
+                raw.append("")  # blank line: newline only, indentation irrelevant
                 idx += 1
                 continue
             cur_indent = len(line) - len(line.lstrip(" "))
             if cur_indent <= parent_indent:
                 break
-            if block_indent is None:
-                block_indent = cur_indent
-            collected.append(line[block_indent:])
+            raw.append(line)
             idx += 1
-        # Trim trailing blank lines that belong to the next node.
-        while collected and collected[-1] == "":
-            collected.pop()
+        # The block's indentation is the *least*-indented non-blank line, so any extra
+        # leading spaces on other lines are preserved as content (a first line that is
+        # more-indented than the rest must not over-strip the others).
+        non_blank = [ln for ln in raw if ln.strip() != ""]
+        block_indent = min(
+            (len(ln) - len(ln.lstrip(" ")) for ln in non_blank), default=parent_indent + 1
+        )
+        collected = [ln[block_indent:] if ln.strip() != "" else "" for ln in raw]
+        # Trailing blank lines belong to the next node unless chomping keeps them.
+        if chomp != "keep":
+            while collected and collected[-1] == "":
+                collected.pop()
         text = _fold(collected) if style == ">" else "\n".join(collected)
-        if chomp == "keep" or chomp == "clip":
+        if chomp in ("keep", "clip"):
             text += "\n"
         # strip: leave as-is (no trailing newline)
         return text, idx

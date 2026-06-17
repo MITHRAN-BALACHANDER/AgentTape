@@ -166,7 +166,10 @@ def test_to_jsonable_variants() -> None:
             self._private = 2
 
     assert _to_jsonable(Obj()) == {"a": 1}
-    assert _to_jsonable(b"bytes") == "bytes"
+    # bytes are preserved (the I/O layer round-trips them via the assets sidecar);
+    # lossily decoding them here corrupted binary tool results.
+    assert _to_jsonable(b"bytes") == b"bytes"
+    assert isinstance(_to_jsonable(b"\x89PNG"), bytes)
     assert _to_jsonable((1, 2)) == [1, 2]
 
     class Dumpable:

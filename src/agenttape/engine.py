@@ -9,10 +9,14 @@ recording raises :class:`UnmatchedInteractionError`.
 
 from __future__ import annotations
 
+import datetime as _dt
+import enum
 import time
+import uuid as _uuid
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from .canonical import canonicalize
@@ -456,39 +460,76 @@ def _reindex(interactions: list[Interaction]) -> list[Interaction]:
     return out
 
 
-def _to_jsonable(obj: Any) -> Any:
-    """Best-effort conversion of an arbitrary response to a JSON-like structure."""
+def _to_jsonable(obj: Any, _seen: frozenset[int] = frozenset()) -> Any:
+    """Best-effort conversion of an arbitrary response to a serialisable structure.
 
-    if obj is None or isinstance(obj, (bool, int, float, str)):
+    Binary stays ``bytes`` — the cassette I/O layer round-trips it losslessly via the
+    assets sidecar (a small inline marker or an external blob), so it must *not* be
+    lossily decoded here. Well-known non-JSON scalars (``datetime``, ``Decimal``,
+    ``UUID``, ``Enum``, ``set``) are converted to a faithful, stable form rather than
+    being dropped. Cyclic object graphs are broken with a placeholder instead of
+    overflowing the stack.
+    """
+
+    # bool is a subclass of int; both pass through unchanged. bytes are preserved.
+    if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
         return obj
+    if isinstance(obj, enum.Enum):
+        return _to_jsonable(obj.value, _seen)
+    if isinstance(obj, (_dt.datetime, _dt.date, _dt.time)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, _uuid.UUID):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return [_to_jsonable(v, _seen) for v in sorted(obj, key=repr)]
+    oid = id(obj)
+    if oid in _seen:
+        return "<cycle>"
+    seen = _seen | {oid}
     if isinstance(obj, dict):
-        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+        return {str(k): _to_jsonable(v, seen) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_to_jsonable(v) for v in obj]
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
+        return [_to_jsonable(v, seen) for v in obj]
     if hasattr(obj, "model_dump"):
         try:
-            return _to_jsonable(obj.model_dump())
+            return _to_jsonable(obj.model_dump(), seen)
         except Exception:  # pragma: no cover
             pass
     if hasattr(obj, "to_dict"):
         try:
-            return _to_jsonable(obj.to_dict())
+            return _to_jsonable(obj.to_dict(), seen)
         except Exception:  # pragma: no cover
             pass
     if hasattr(obj, "__dict__"):
-        return {str(k): _to_jsonable(v) for k, v in vars(obj).items() if not k.startswith("_")}
+        return {
+            str(k): _to_jsonable(v, seen) for k, v in vars(obj).items() if not k.startswith("_")
+        }
     return str(obj)
 
 
+# Simple, serialisable attributes worth preserving on replayed SDK errors so that
+# ``except RateLimitError as e: e.status_code`` keeps working offline. Only JSON-simple
+# values are captured (a real ``httpx.Response`` cannot be reconstructed faithfully).
+_ERROR_ATTRS = ("status_code", "code", "param", "type", "request_id", "retry_after")
+
+
 def _serialize_exception(exc: BaseException) -> dict[str, Any]:
-    return {
+    data: dict[str, Any] = {
         "type": type(exc).__name__,
         "module": type(exc).__module__,
         "message": str(exc),
         "repr": repr(exc),
     }
+    attrs: dict[str, Any] = {}
+    for name in _ERROR_ATTRS:
+        value = getattr(exc, name, None)
+        if isinstance(value, (bool, int, float, str)):
+            attrs[name] = value
+    if attrs:
+        data["attrs"] = attrs
+    return data
 
 
 def _safe_usage(
@@ -514,7 +555,15 @@ def _raise_recorded_error(error: dict[str, Any]) -> None:
     module_name = str(error.get("module", "builtins"))
     message = error.get("message", "")
     exc_cls = _resolve_exception_class(module_name, type_name)
-    raise _instantiate_exception(exc_cls, message, type_name)
+    exc = _instantiate_exception(exc_cls, message, type_name)
+    attrs = error.get("attrs")
+    if isinstance(attrs, dict):
+        for name, value in attrs.items():
+            try:
+                setattr(exc, name, value)
+            except Exception:  # pragma: no cover - read-only/slotted attributes
+                pass
+    raise exc
 
 
 def _resolve_exception_class(module_name: str, type_name: str) -> type[BaseException]:

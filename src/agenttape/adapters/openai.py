@@ -69,7 +69,15 @@ def _build_request(kind: str, kwargs: dict[str, Any]) -> dict[str, Any]:
 def _dump(resp: Any) -> Any:
     if hasattr(resp, "model_dump"):
         try:
-            return resp.model_dump()
+            # ``mode="json"`` yields JSON-native primitives (enums -> str, datetimes
+            # -> ISO strings) so the recorded form is faithful and re-validates on
+            # replay; the plain call is the fallback for objects that reject the kwarg.
+            return resp.model_dump(mode="json")
+        except TypeError:
+            try:
+                return resp.model_dump()
+            except Exception:  # pragma: no cover - defensive
+                pass
         except Exception:  # pragma: no cover - defensive
             pass
     if isinstance(resp, dict):
@@ -91,6 +99,15 @@ def _rehydrate_response(data: Any) -> Any:
         from openai.types.responses import Response
 
         return Response.model_validate(data)
+    except Exception:
+        return box(data)
+
+
+def _rehydrate_embeddings(data: Any) -> Any:
+    try:
+        from openai.types import CreateEmbeddingResponse
+
+        return CreateEmbeddingResponse.model_validate(data)
     except Exception:
         return box(data)
 
@@ -210,6 +227,12 @@ class OpenAIAdapter(Adapter):
             ["Responses", "AsyncResponses"],
             kind="responses",
             rehydrate=_rehydrate_response,
+        )
+        restores += self._patch_target(
+            "openai.resources.embeddings",
+            ["Embeddings", "AsyncEmbeddings"],
+            kind="embeddings",
+            rehydrate=_rehydrate_embeddings,
         )
         return restores
 

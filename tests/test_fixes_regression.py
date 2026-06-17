@@ -166,3 +166,382 @@ def test_matcher_fallback_chain_uses_second_matcher(cassette_dir: Path) -> None:
     # fix only matchers[0] was ever consulted and this raised UnmatchedInteractionError.
     with use_cassette("fb", mode="none", matchers=["exact", "ordered"], cassette_dir=cassette_dir):
         assert echo({"a": 999}) == {"echo": {"a": 1}}
+
+
+# -- HTTP: compressed responses round-trip without DecodingError ------------- #
+
+
+def test_gzip_response_records_and_replays(cassette_dir: Path) -> None:
+    """A gzip/deflate/br response must not be reconstructed with its wire headers.
+
+    Before the fix the recorded ``Content-Encoding: gzip`` survived onto a body that
+    httpx had already decompressed, so rebuilding the response raised ``DecodingError``
+    on both record (nested under the SDK) and replay.
+    """
+
+    import gzip
+    import json as _json
+
+    httpx = pytest.importorskip("httpx")
+    payload = {"ok": True, "n": 42, "msg": "hello"}
+    raw = gzip.compress(_json.dumps(payload).encode("utf-8"))
+    calls = {"n": 0}
+
+    def handler(request: object) -> object:
+        calls["n"] += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            content=raw,
+        )
+
+    def agent() -> dict:
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        return client.get("https://api.example.com/data").json()
+
+    with use_cassette("gz", mode="record", cassette_dir=cassette_dir):
+        assert agent() == payload
+    recorded_calls = calls["n"]
+    text = (cassette_dir / "gz.yaml").read_text(encoding="utf-8")
+    assert "content-encoding" not in text.lower()
+
+    with use_cassette("gz", mode="none", cassette_dir=cassette_dir):
+        assert agent() == payload  # would raise httpx.DecodingError before the fix
+    assert calls["n"] == recorded_calls  # zero network in replay
+
+
+def test_httpx_build_drops_wire_headers_and_sets_elapsed() -> None:
+    httpx = pytest.importorskip("httpx")
+    from agenttape.adapters.http import _httpx_build
+
+    request = httpx.Request("GET", "http://x")
+    # A legacy/naive cassette payload that still carries the wire headers.
+    payload = {
+        "status_code": 200,
+        "headers": {
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+            "content-length": "999",
+        },
+        "reason_phrase": "OK",
+        "http_version": "HTTP/2",
+        "text": '{"ok": true}',
+    }
+    resp = _httpx_build(httpx, payload, request)
+    assert resp.json() == {"ok": True}
+    assert "content-encoding" not in resp.headers  # the crash trigger is gone
+    # httpx recomputes an accurate Content-Length from the body; the stale wire value
+    # (which described the compressed size) must not survive.
+    assert resp.headers.get("content-length") != "999"
+    assert resp.http_version == "HTTP/2"
+    assert resp.elapsed.total_seconds() == 0  # would RuntimeError if never set
+
+
+def test_requests_build_reconstructs_fields() -> None:
+    requests = pytest.importorskip("requests")
+    from agenttape.adapters.http import _requests_build
+
+    request = requests.Request("GET", "http://x/data").prepare()
+    payload = {
+        "status_code": 200,
+        "headers": {"content-type": "text/plain; charset=latin-1"},
+        "text": "hello",
+    }
+    resp = _requests_build(requests, payload, request)
+    assert resp.encoding == "latin-1"
+    assert resp.elapsed.total_seconds() == 0
+    assert resp.history == []
+    assert resp.raw.read() == b"hello"
+
+
+# -- HTTP: body secrets are redacted (structured capture) -------------------- #
+
+
+def test_http_body_secrets_are_redacted(cassette_dir: Path) -> None:
+    httpx = pytest.importorskip("httpx")
+
+    def handler(request: object) -> object:
+        return httpx.Response(200, json={"access_token": "tok-super-secret", "ok": True})
+
+    def login() -> dict:
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        return client.post(
+            "https://auth.example.com/token",
+            json={"username": "bob", "password": "hunter2"},
+        ).json()
+
+    with use_cassette("auth", mode="record", cassette_dir=cassette_dir):
+        login()
+    text = (cassette_dir / "auth.yaml").read_text(encoding="utf-8")
+    assert "hunter2" not in text  # request body secret
+    assert "tok-super-secret" not in text  # response body secret
+    assert "***REDACTED***" in text
+
+
+# -- HTTP: form bodies are redacted yet still replay (via stored match_key) -- #
+
+
+def test_http_form_body_secret_redacted_and_replays(cassette_dir: Path) -> None:
+    httpx = pytest.importorskip("httpx")
+    calls = {"n": 0}
+
+    def handler(request: object) -> object:
+        calls["n"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    def login() -> dict:
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        # data=... sends application/x-www-form-urlencoded.
+        return client.post(
+            "https://api.example.com/login", data={"user": "bob", "password": "hunter2"}
+        ).json()
+
+    with use_cassette("form", mode="record", cassette_dir=cassette_dir):
+        login()
+    text = (cassette_dir / "form.yaml").read_text(encoding="utf-8")
+    assert "hunter2" not in text
+    assert "***REDACTED***" in text
+    recorded = calls["n"]
+    # Redaction rewrites the stored body, but the match_key was computed pre-redaction,
+    # so the (unredacted) replay request still resolves to the recording.
+    with use_cassette("form", mode="none", cassette_dir=cassette_dir):
+        assert login() == {"ok": True}
+    assert calls["n"] == recorded
+
+
+# -- HTTP: the async httpx transport path records and replays ---------------- #
+
+
+def test_async_httpx_record_replay(cassette_dir: Path) -> None:
+    httpx = pytest.importorskip("httpx")
+    calls = {"n": 0}
+
+    def handler(request: object) -> object:
+        calls["n"] += 1
+        return httpx.Response(200, json={"ok": True, "path": "x"})
+
+    async def agent() -> dict:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            resp = await client.get("https://api.example.com/x")
+            return resp.json()
+
+    with use_cassette("ahx", mode="record", cassette_dir=cassette_dir):
+        assert asyncio.run(agent()) == {"ok": True, "path": "x"}
+    recorded = calls["n"]
+    with use_cassette("ahx", mode="none", cassette_dir=cassette_dir):
+        assert asyncio.run(agent()) == {"ok": True, "path": "x"}
+    assert calls["n"] == recorded
+
+
+# -- HTTP: multipart uploads match across random boundaries ------------------ #
+
+
+def test_multipart_upload_matches_on_replay(cassette_dir: Path) -> None:
+    httpx = pytest.importorskip("httpx")
+    calls = {"n": 0}
+
+    def handler(request: object) -> object:
+        calls["n"] += 1
+        return httpx.Response(200, json={"uploaded": True})
+
+    def upload() -> dict:
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        # httpx generates a fresh random multipart boundary on every call.
+        return client.post(
+            "https://api.example.com/files", files={"f": ("a.txt", b"hello world")}
+        ).json()
+
+    with use_cassette("mp", mode="record", cassette_dir=cassette_dir):
+        upload()
+    recorded_calls = calls["n"]
+    with use_cassette("mp", mode="none", cassette_dir=cassette_dir):
+        assert upload() == {"uploaded": True}  # different boundary; must still match
+    assert calls["n"] == recorded_calls
+
+
+# -- bytes survive the full record/replay round-trip ------------------------- #
+
+
+def test_tool_bytes_response_roundtrip(cassette_dir: Path) -> None:
+    png = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+
+    @tool
+    def load_image() -> dict:
+        return {"data": png, "name": "logo.png"}
+
+    with use_cassette("img", mode="record", cassette_dir=cassette_dir):
+        assert load_image()["data"] == png
+    with use_cassette("img", mode="none", cassette_dir=cassette_dir):
+        out = load_image()["data"]
+    assert out == png and isinstance(out, bytes)
+
+
+# -- _to_jsonable preserves rich scalar types and breaks cycles -------------- #
+
+
+def test_to_jsonable_rich_types() -> None:
+    import datetime
+    import decimal
+    import enum
+    import uuid
+
+    from agenttape.engine import _to_jsonable
+
+    class Color(enum.Enum):
+        RED = "red"
+
+    assert _to_jsonable(Color.RED) == "red"
+    assert _to_jsonable(decimal.Decimal("1.50")) == "1.50"
+    u = uuid.uuid4()
+    assert _to_jsonable(u) == str(u)
+    assert _to_jsonable(datetime.date(2020, 1, 2)) == "2020-01-02"
+    assert _to_jsonable(datetime.datetime(2020, 1, 2, 3, 4, 5)) == "2020-01-02T03:04:05"
+    assert _to_jsonable({3, 1, 2}) == [1, 2, 3]
+
+    cycle: dict = {}
+    cycle["self"] = cycle
+    assert _to_jsonable(cycle) == {"self": "<cycle>"}
+
+
+# -- recorded exception attributes (status_code, …) survive replay ----------- #
+
+
+class ApiError(Exception):
+    """A non-builtin error with an attribute, like ``openai.RateLimitError``."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_exception_attrs_preserved_on_replay(cassette_dir: Path) -> None:
+    @tool
+    def call_api() -> None:
+        raise ApiError("rate limited", status_code=429)
+
+    with use_cassette("apierr", mode="record", cassette_dir=cassette_dir):
+        with pytest.raises(ApiError):
+            call_api()
+    with use_cassette("apierr", mode="none", cassette_dir=cassette_dir):
+        with pytest.raises(ApiError) as excinfo:
+            call_api()
+    assert excinfo.value.status_code == 429  # attribute reconstructed offline
+
+
+# -- concurrent asyncio sessions do not cross-contaminate -------------------- #
+
+
+def test_concurrent_sessions_do_not_cross_contaminate(cassette_dir: Path) -> None:
+    import agenttape.cassette as cio
+    from agenttape.recorder import active_session
+
+    @tool
+    async def work(label: str, x: int) -> dict:
+        await asyncio.sleep(0.01)
+        return {"label": label, "x": x}
+
+    async def one(name: str) -> bool:
+        async with use_cassette(name, mode="record", cassette_dir=cassette_dir) as sess:
+            ok = active_session() is sess
+            for i in range(3):
+                await work(name, i)
+                await asyncio.sleep(0.005)
+                ok = ok and active_session() is sess
+            return ok
+
+    async def main() -> list[bool]:
+        return await asyncio.gather(*[one(f"c{n}") for n in range(4)])
+
+    results = asyncio.run(main())
+    assert all(results)  # each task always saw *its own* session (was thread-local)
+    for n in range(4):
+        c = cio.read_cassette(cassette_dir / f"c{n}.yaml")
+        labels = {i.request["args"]["label"] for i in c.interactions}
+        assert labels == {f"c{n}"}  # no interaction leaked into the wrong cassette
+
+
+# -- OpenAI embeddings endpoint is intercepted (record + offline replay) ----- #
+
+
+def test_openai_embeddings_record_replay(cassette_dir: Path) -> None:
+    pytest.importorskip("openai")
+    httpx = pytest.importorskip("httpx")
+    from openai import OpenAI
+
+    calls = {"n": 0}
+    body = {
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+        "model": "text-embedding-3-small",
+        "usage": {"prompt_tokens": 1, "total_tokens": 1},
+    }
+
+    def handler(request: object) -> object:
+        calls["n"] += 1
+        return httpx.Response(200, json=body)
+
+    def client() -> object:
+        return OpenAI(
+            api_key="sk-test-x",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    def agent() -> list[float]:
+        resp = client().embeddings.create(model="text-embedding-3-small", input="hello")
+        return list(resp.data[0].embedding)
+
+    with use_cassette("emb", mode="record", cassette_dir=cassette_dir):
+        assert agent() == [0.1, 0.2, 0.3]
+    recorded = calls["n"]
+    with use_cassette("emb", mode="none", cassette_dir=cassette_dir):
+        assert agent() == [0.1, 0.2, 0.3]
+    assert calls["n"] == recorded  # replayed offline, no network
+
+
+# -- validate scans externalized asset files for leaked secrets -------------- #
+
+
+def test_validate_scans_asset_files(tmp_path: Path) -> None:
+    import agenttape.cassette as cio
+    from agenttape.validate import validate_cassette
+
+    secret = "AKIA" + "A" * 16  # AWS access-key-id shape
+    # Secret sits past the 64-char preview window, so it lives only in the asset file.
+    big = ("x" * 100) + " " + secret
+    c = Cassette(
+        version=SCHEMA_VERSION,
+        interactions=[
+            Interaction(
+                index=0,
+                kind="http",
+                request={"url": "http://x"},
+                response={"text": big},
+                match_key="k",
+            )
+        ],
+    )
+    path = tmp_path / "leak.yaml"
+    cio.write_cassette(c, path, redactor=None, assets_threshold=20)
+    # The cassette body must not contain the secret (only a short preview).
+    assert secret not in path.read_text(encoding="utf-8")
+    report = validate_cassette(path)
+    assert any("leaked secret" in e for e in report.errors)
+
+
+# -- rm cleans up the derived cassette's assets sidecar ---------------------- #
+
+
+def test_rm_removes_derived_assets(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from agenttape.cli import cmd_rm
+
+    path = tmp_path / "c.yaml"
+    path.write_text("version: '1'\n", encoding="utf-8")
+    derived_assets = tmp_path / "c.derived.assets"
+    derived_assets.mkdir()
+    (derived_assets / "blob").write_bytes(b"data")
+
+    cmd_rm(SimpleNamespace(cassette=str(path), force=True))
+    assert not path.exists()
+    assert not derived_assets.exists()

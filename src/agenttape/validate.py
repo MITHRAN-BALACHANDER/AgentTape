@@ -109,15 +109,28 @@ def _scan_volatile(i: int, request: Any, report: ValidationReport, prefix: str =
 
 
 def _scan_secrets(raw: dict[str, Any], report: ValidationReport, path: Path) -> None:
-    text = path.read_text(encoding="utf-8")
+    from .assets import assets_dir_for
+
+    # Scan the cassette body *and* every externalized asset file — a large secret
+    # (e.g. a token-bearing response body) lives in the sidecar, not the cassette.
+    texts = [path.read_text(encoding="utf-8")]
+    assets_dir = assets_dir_for(path)
+    if assets_dir.is_dir():
+        for asset in sorted(assets_dir.iterdir()):
+            if asset.is_file():
+                try:
+                    texts.append(asset.read_text(encoding="utf-8", errors="replace"))
+                except OSError:  # pragma: no cover - unreadable asset
+                    continue
     seen: set[str] = set()
-    for pattern in _SECRET_PATTERNS:
-        for match in pattern.findall(text):
-            snippet = match if isinstance(match, str) else match[0]
-            if snippet in seen:
-                continue
-            seen.add(snippet)
-            report.errors.append(
-                f"possible leaked secret/PII matching /{pattern.pattern}/: "
-                f"{snippet[:12]}…  Run `agenttape redact {path}` to scrub it."
-            )
+    for text in texts:
+        for pattern in _SECRET_PATTERNS:
+            for match in pattern.findall(text):
+                snippet = match if isinstance(match, str) else match[0]
+                if snippet in seen:
+                    continue
+                seen.add(snippet)
+                report.errors.append(
+                    f"possible leaked secret/PII matching /{pattern.pattern}/: "
+                    f"{snippet[:12]}…  Run `agenttape redact {path}` to scrub it."
+                )

@@ -36,9 +36,7 @@ from .errors import DeterminismDriftWarning
 
 # The original callables/types we patch — captured once at import.
 _REAL_TIME = time.time
-_REAL_MONOTONIC = time.monotonic
 _REAL_TIME_NS = time.time_ns
-_REAL_MONOTONIC_NS = time.monotonic_ns
 _REAL_DATETIME = _dt.datetime
 _REAL_DATE = _dt.date
 _REAL_UUID4 = uuid.uuid4
@@ -79,7 +77,6 @@ class FreezeController:
                 _REAL_DATETIME.fromtimestamp(self._base_time, _dt.timezone.utc).isoformat(),
             )
         )
-        self._mono_counter = 0.0
         # Env bookkeeping.
         self._env_snapshot: dict[str, str] = dict(self.state.get("env", {}))
         # Lifecycle bookkeeping.
@@ -155,10 +152,6 @@ class FreezeController:
     def _time(self) -> float:
         return self._base_time
 
-    def _monotonic(self) -> float:
-        self._mono_counter += 1e-6
-        return self._base_time + self._mono_counter
-
     # -- uuid -------------------------------------------------------------- #
 
     def _next_uuid(self) -> uuid.UUID:
@@ -233,19 +226,9 @@ def _dispatch_time() -> float:
     return fc._time() if fc is not None else _REAL_TIME()
 
 
-def _dispatch_monotonic() -> float:
-    fc = _active_clock()
-    return fc._monotonic() if fc is not None else _REAL_MONOTONIC()
-
-
 def _dispatch_time_ns() -> int:
     fc = _active_clock()
     return int(fc._time() * 1e9) if fc is not None else _REAL_TIME_NS()
-
-
-def _dispatch_monotonic_ns() -> int:
-    fc = _active_clock()
-    return int(fc._monotonic() * 1e9) if fc is not None else _REAL_MONOTONIC_NS()
 
 
 def _dispatch_uuid4() -> uuid.UUID:
@@ -339,9 +322,13 @@ def _patch_clock_globals() -> list[Callable[[], None]]:
         restores.append(_restorer(target, name, original))
 
     patch(time, "time", _dispatch_time)
-    patch(time, "monotonic", _dispatch_monotonic)
     patch(time, "time_ns", _dispatch_time_ns)
-    patch(time, "monotonic_ns", _dispatch_monotonic_ns)
+    # NB: time.monotonic / monotonic_ns are deliberately NOT frozen. Like
+    # time.perf_counter they are *duration* clocks, and schedulers depend on them
+    # advancing in real time — asyncio computes its timer deadlines from
+    # loop.time() == time.monotonic(), so freezing it makes ``await asyncio.sleep``
+    # (and any monotonic-based timeout) wait forever. Only the wall clock
+    # (time.time / datetime) needs pinning for deterministic recorded timestamps.
     # Replace the real datetime/date classes in every already-imported module that
     # holds a direct reference (freezegun-lite). The frozen classes dispatch through
     # the active controller, so this single set of classes serves every session.

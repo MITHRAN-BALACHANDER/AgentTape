@@ -292,6 +292,9 @@ def cmd_rm(args: Any) -> int:
     derived = path.with_suffix("").with_name(path.stem + ".derived" + path.suffix)
     if derived.exists():
         derived.unlink()
+    derived_assets = assets_dir_for(derived)
+    if derived_assets.exists():
+        shutil.rmtree(derived_assets)
     print(f"removed {path}")
     return 0
 

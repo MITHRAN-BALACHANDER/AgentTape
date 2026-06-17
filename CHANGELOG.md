@@ -8,6 +8,53 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **HTTP replay no longer corrupts compressed responses.** The raw httpx/requests
+  fallback recorded the *decoded* body but kept the wire headers, so a
+  `Content-Encoding: gzip` (or br/deflate) response was reconstructed with a gzip
+  header over already-decompressed bytes — httpx raised `DecodingError` at
+  construction, breaking both replay *and* recording (the fallback rewraps the
+  response even when nested under the OpenAI adapter). `Content-Encoding`,
+  `Content-Length` and `Transfer-Encoding` are now dropped from the recorded
+  response so the framework reconstructs the body faithfully.
+- **`time.monotonic` / `monotonic_ns` are no longer frozen.** Like `perf_counter`
+  they are duration clocks that schedulers depend on; freezing `monotonic` made
+  `await asyncio.sleep(...)` (and any monotonic-based timeout) wait forever under a
+  recorded session, because asyncio derives its timer deadlines from it. Only the
+  wall clock (`time.time` / `datetime`) is pinned now.
+- **Binary tool/boundary results are preserved.** `_to_jsonable` lossily decoded
+  `bytes` to a UTF-8 string with replacement characters, silently corrupting images,
+  files and other binary payloads; bytes now round-trip losslessly via the assets
+  sidecar. `datetime`/`date`/`Decimal`/`UUID`/`Enum`/`set` convert to a faithful,
+  stable form (an `Enum` previously collapsed to `{}`), and cyclic object graphs are
+  broken with a `"<cycle>"` placeholder instead of overflowing the stack.
+- **Secrets in raw HTTP request/response *bodies* are now redacted.** JSON and
+  form-urlencoded bodies are captured structurally, so the denylist sees nested keys
+  (`password` in a login POST, `access_token` in a token response) instead of an
+  opaque string the regex rules missed. Redacted bodies still replay, because the
+  match key is computed pre-redaction.
+- **Multipart uploads (file / audio endpoints) match on replay.** The random
+  multipart boundary in the body and `Content-Type` is normalised to a fixed token,
+  so repeated uploads resolve to the recording instead of raising
+  `UnmatchedInteractionError`.
+- **YAML round-trip is lossless for awkward multiline strings.** The stdlib emitter
+  lost the extra newlines of a string ending in `\n\n+` and corrupted a block whose
+  first line was indented; such strings now use a double-quoted scalar, and the
+  block reader dedents by the least-indented line so interior/leading spaces survive.
+- **Reconstructed HTTP responses carry the fields callers expect.** httpx responses
+  restore `reason_phrase` / `http_version` and set `.elapsed` (which otherwise
+  raises on access); requests responses set `.encoding`, `.raw`, `.elapsed` and
+  `.history`.
+- **Replayed SDK exceptions keep their simple attributes** (`status_code`, `code`,
+  `retry_after`, …), so `except RateLimitError as e: e.status_code` works offline.
+- **The active-session lookup is a `ContextVar`, not a thread-local.** Two cassettes
+  opened concurrently in one event loop (`asyncio.gather`) no longer corrupt a shared
+  stack and route interceptions to the wrong cassette.
+- OpenAI responses are dumped with `model_dump(mode="json")` so enums/datetimes are
+  recorded in their faithful JSON form and re-validate on replay; the `embeddings`
+  endpoint is now intercepted alongside `chat.completions` and `responses`.
+- `agenttape validate` scans externalized asset files (not just the cassette body)
+  for leaked secrets, and `agenttape rm` also removes the derived cassette's assets
+  sidecar.
 - `pytest --cov=agenttape` now measures the engine correctly (90%+, matching CI's
   `coverage run`). The package `__init__` and the pytest entry-point plugin defer
   their heavy imports (PEP 562 lazy loading) so the engine no longer loads — and

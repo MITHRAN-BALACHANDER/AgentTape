@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import functools
 import inspect
-import threading
 from collections.abc import Awaitable, Callable, Iterable
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -25,23 +25,19 @@ from .schema import SCHEMA_VERSION, Cassette
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-# Active-session stack (thread-local) so adapters and the @tool decorator can find
-# the current engine at call time without threading it through every call.
-_local = threading.local()
-
-
-def _stack() -> list[Session]:
-    stack = getattr(_local, "stack", None)
-    if stack is None:
-        stack = []
-        _local.stack = stack
-    return stack
+# Active-session stack so adapters and the @tool decorator can find the current engine
+# at call time without threading it through every call. A ContextVar (not a
+# thread-local) is required for correctness: it gives each thread *and* each asyncio
+# task an independent view, so two sessions opened concurrently in one event loop
+# (``asyncio.gather``) no longer corrupt a shared list and route to the wrong cassette.
+# This mirrors the freeze layer's ``_ACTIVE`` design.
+_session_stack: ContextVar[tuple[Session, ...]] = ContextVar("agenttape_session_stack", default=())
 
 
 def active_session() -> Session | None:
     """Return the innermost active :class:`Session`, or ``None``."""
 
-    stack = _stack()
+    stack = _session_stack.get()
     return stack[-1] if stack else None
 
 
@@ -113,6 +109,7 @@ class Session:
 
         self.meta: dict[str, Any] = {}
         self._adapters: list[Any] = []
+        self._stack_token: Any = None
         self.run_id = str(_REAL_UUID4())
         self.created_at = _REAL_DATETIME.now().isoformat()
 
@@ -131,7 +128,7 @@ class Session:
         from .adapters import install_all
 
         self.freeze.__enter__()
-        _stack().append(self)
+        self._stack_token = _session_stack.set((*_session_stack.get(), self))
         self._adapters = install_all(self)
         return self
 
@@ -141,9 +138,12 @@ class Session:
         try:
             uninstall_all(self._adapters)
         finally:
-            stack = _stack()
-            if stack and stack[-1] is self:
-                stack.pop()
+            if self._stack_token is not None:
+                try:
+                    _session_stack.reset(self._stack_token)
+                except (ValueError, LookupError):  # pragma: no cover - context mismatch
+                    _session_stack.set(tuple(s for s in _session_stack.get() if s is not self))
+                self._stack_token = None
             self.freeze.__exit__(exc_type, exc, tb)
             if exc_type is None:
                 self._maybe_write()
