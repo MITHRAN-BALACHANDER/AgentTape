@@ -1,9 +1,9 @@
 # AgentTape
 
-**VCR.py for AI agents.** Record every external interaction your agent makes — LLM
-calls *and* tool calls — into human-readable "cassettes", then replay them
-deterministically so your agent tests run **offline, for free, with zero side
-effects.**
+**Deterministic record and replay for AI agents.** Capture every external
+interaction your agent makes — LLM calls *and* tool calls — into human-readable
+"cassettes", then replay them deterministically so your tests run **offline, for
+free, with zero side effects.**
 
 [![CI](https://github.com/MITHRAN-BALACHANDER/AgentTape/actions/workflows/ci.yml/badge.svg)](https://github.com/MITHRAN-BALACHANDER/AgentTape/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/agenttape.svg)](https://pypi.org/project/agenttape/)

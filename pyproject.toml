@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agenttape"
 version = "0.1.0"
-description = "VCR.py for AI agents — deterministic record/replay of LLM and tool calls into human-readable cassettes."
+description = "Deterministic record/replay of LLM and tool calls for AI agents, captured into human-readable cassettes."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -17,7 +17,6 @@ keywords = [
     "testing",
     "record",
     "replay",
-    "vcr",
     "cassette",
     "determinism",
     "openai",

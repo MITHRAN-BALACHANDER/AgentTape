@@ -1,13 +1,14 @@
 /* AgentTape documentation chrome.
    Clean, monochrome navbar + sidebar in the style of Vercel / Next.js docs:
-   neutral grays, hairline borders, rounded hover states, generous spacing. */
+   neutral grays, hairline borders, rounded hover states, theme-aware text. */
 
 :root {
   --at-radius: 8px;
 }
 
 /* ----------------------------------------------------------------------- */
-/* Neutral palette                                                         */
+/* Neutral palette (every value is scheme-scoped, so all text is           */
+/* theme-aware in both light and dark mode)                                */
 /* ----------------------------------------------------------------------- */
 [data-md-color-scheme="default"] {
   --at-bg: #ffffff;
@@ -18,9 +19,8 @@
   --at-fg: #171717;
   --at-muted: #5f5f5f;
   --at-faint: #8f8f8f;
-  --at-header-bg: rgba(255, 255, 255, 0.85);
 
-  --md-accent-fg-color: #000000;
+  --md-accent-fg-color: #171717;
   --md-typeset-a-color: #171717;
 }
 
@@ -33,24 +33,25 @@
   --at-fg: #ededed;
   --at-muted: #a1a1a1;
   --at-faint: #7d7d7d;
-  --at-header-bg: rgba(10, 10, 10, 0.85);
 
   --md-default-bg-color: #0a0a0a;
   --md-code-bg-color: #111111;
-  --md-accent-fg-color: #ffffff;
+  --md-accent-fg-color: #ededed;
   --md-typeset-a-color: #ededed;
 }
 
 /* ----------------------------------------------------------------------- */
-/* Top navbar                                                              */
+/* Top navbar — Material drives the background (white in light, black in    */
+/* dark); we add the hairline border, drop the shadow, and pin text.        */
 /* ----------------------------------------------------------------------- */
-.md-header {
-  background-color: var(--at-header-bg);
-  -webkit-backdrop-filter: saturate(180%) blur(10px);
-  backdrop-filter: saturate(180%) blur(10px);
-  color: var(--at-fg);
-  border-bottom: 1px solid var(--at-border);
+.md-header,
+.md-header--shadow {
   box-shadow: none;
+}
+
+[data-md-color-scheme="default"] .md-header,
+[data-md-color-scheme="slate"] .md-header {
+  border-bottom: 1px solid var(--at-border);
 }
 
 .md-header__title {
@@ -66,7 +67,6 @@
   font-weight: 600;
 }
 
-/* Repository link in the header */
 .md-header__source {
   color: var(--at-fg);
 }

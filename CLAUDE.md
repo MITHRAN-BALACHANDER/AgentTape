@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-AgentTape is "VCR.py for AI agents": it records an agent's external interactions
+AgentTape provides deterministic record/replay for AI agents: it records an agent's external interactions
 (LLM calls *and* tool calls) into human-readable YAML "cassettes", then replays them
 deterministically so tests run offline, free, and with zero side effects. It is a
 pure-Python library + CLI + pytest plugin. The package lives under `src/agenttape/`.
