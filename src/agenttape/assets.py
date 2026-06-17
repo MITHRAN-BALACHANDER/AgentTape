@@ -20,12 +20,19 @@ from typing import Any
 from .canonical import content_hash
 
 ASSET_MARKER = "__agenttape_asset__"
+# Inline tag for small ``bytes`` values, so they round-trip back to ``bytes`` instead
+# of being silently left as a base64 string on load.
+BYTES_MARKER = "__agenttape_bytes__"
 DEFAULT_THRESHOLD_BYTES = 4096
 _PREVIEW_LEN = 64
 
 
 def is_asset_ref(obj: Any) -> bool:
     return isinstance(obj, dict) and ASSET_MARKER in obj
+
+
+def is_bytes_ref(obj: Any) -> bool:
+    return isinstance(obj, dict) and len(obj) == 1 and BYTES_MARKER in obj
 
 
 def externalize(obj: Any, assets_dir: Path, threshold: int = DEFAULT_THRESHOLD_BYTES) -> Any:
@@ -59,7 +66,8 @@ def _externalize(obj: Any, threshold: int, writes: dict[str, bytes]) -> Any:
         if len(obj) > threshold:
             preview = obj[:_PREVIEW_LEN].decode("utf-8", errors="replace")
             return _make_ref(obj, "base64", preview, writes)
-        return base64.b64encode(obj).decode("ascii")
+        # Small bytes stay inline but self-described so load reverses them to bytes.
+        return {BYTES_MARKER: base64.b64encode(obj).decode("ascii")}
     return obj
 
 
@@ -80,6 +88,8 @@ def inline(obj: Any, assets_dir: Path) -> Any:
 
     if is_asset_ref(obj):
         return _resolve_ref(obj, assets_dir)
+    if is_bytes_ref(obj):
+        return base64.b64decode(obj[BYTES_MARKER])
     if isinstance(obj, dict):
         return {k: inline(v, assets_dir) for k, v in obj.items()}
     if isinstance(obj, list):

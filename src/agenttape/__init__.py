@@ -1,4 +1,4 @@
-"""AgentTape — VCR.py for AI agents.
+"""AgentTape — deterministic record/replay for AI agents.
 
 Deterministic record / replay of an agent's external interactions (LLM calls and
 tool calls) into human-readable cassettes, so agent tests run offline, for free,
@@ -27,6 +27,8 @@ from .errors import (
     ConfigError,
     DeterminismDriftWarning,
     SchemaVersionError,
+    StreamingNotRecordedWarning,
+    StreamingReplayError,
     UnmatchedInteractionError,
 )
 from .recorder import Session, active_session, record, replay, use_cassette
@@ -67,4 +69,6 @@ __all__ = [  # noqa: RUF022 - grouped by concern for readability, not alphabetis
     "SchemaVersionError",
     "ConfigError",
     "DeterminismDriftWarning",
+    "StreamingReplayError",
+    "StreamingNotRecordedWarning",
 ]

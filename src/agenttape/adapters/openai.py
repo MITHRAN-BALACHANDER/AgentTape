@@ -16,12 +16,40 @@ recordable); everything else is captured.
 from __future__ import annotations
 
 import functools
+import warnings
 from collections.abc import Callable
 from typing import Any
 
 from .._box import box
+from ..errors import StreamingNotRecordedWarning, StreamingReplayError
 from ..recorder import active_session
 from .base import Adapter, RefCountedPatch
+
+_STREAM_LIVE_MSG = (
+    "Streaming OpenAI responses are not captured by AgentTape (a token stream "
+    "cannot be recorded deterministically); this call runs live and is NOT added to "
+    "the cassette. Record without stream=True if you want it replayed."
+)
+_STREAM_REPLAY_MSG = (
+    "A streaming OpenAI call was made during offline replay, but streaming responses "
+    "cannot be replayed deterministically and AgentTape will not silently hit the "
+    "network. Re-record this interaction without stream=True, or mark the 'llm' "
+    "boundary live (e.g. use_cassette(..., live={'llm'})) to run it for real."
+)
+
+
+def _guard_stream(session: Any) -> None:
+    """Allow a streaming pass-through only when the boundary would execute for real.
+
+    In any offline-replay disposition this raises instead of silently calling the
+    real API, preserving the "zero network in replay" guarantee.
+    """
+
+    if session.engine.executes_for_real("llm", "llm"):
+        warnings.warn(_STREAM_LIVE_MSG, StreamingNotRecordedWarning, stacklevel=3)
+        return
+    raise StreamingReplayError(_STREAM_REPLAY_MSG)
+
 
 # Request kwargs that are transport/volatile rather than semantic.
 _DROP_KEYS = frozenset(
@@ -91,7 +119,10 @@ def _route(
     rehydrate: Callable[[Any], Any],
 ) -> Any:
     session = active_session()
-    if session is None or kwargs.get("stream"):
+    if session is None:
+        return orig(self_obj, *args, **kwargs)
+    if kwargs.get("stream"):
+        _guard_stream(session)
         return orig(self_obj, *args, **kwargs)
     kwargs = _apply_model_override(session, kwargs)
     session.set_meta(framework="openai", model=kwargs.get("model"))
@@ -100,10 +131,10 @@ def _route(
     def executor() -> Any:
         return _dump(orig(self_obj, *args, **kwargs))
 
-    result = session.engine.intercept("llm", request, boundary="llm", executor=executor)
-    obj = rehydrate(result) if isinstance(result, dict) else result
-    _stamp_usage(session, obj)
-    return obj
+    result = session.engine.intercept(
+        "llm", request, boundary="llm", executor=executor, usage_extractor=_extract_usage
+    )
+    return rehydrate(result) if isinstance(result, dict) else result
 
 
 async def _aroute(
@@ -116,7 +147,10 @@ async def _aroute(
     rehydrate: Callable[[Any], Any],
 ) -> Any:
     session = active_session()
-    if session is None or kwargs.get("stream"):
+    if session is None:
+        return await orig(self_obj, *args, **kwargs)
+    if kwargs.get("stream"):
+        _guard_stream(session)
         return await orig(self_obj, *args, **kwargs)
     kwargs = _apply_model_override(session, kwargs)
     session.set_meta(framework="openai", model=kwargs.get("model"))
@@ -125,10 +159,10 @@ async def _aroute(
     async def executor() -> Any:
         return _dump(await orig(self_obj, *args, **kwargs))
 
-    result = await session.engine.aintercept("llm", request, boundary="llm", executor=executor)
-    obj = rehydrate(result) if isinstance(result, dict) else result
-    _stamp_usage(session, obj)
-    return obj
+    result = await session.engine.aintercept(
+        "llm", request, boundary="llm", executor=executor, usage_extractor=_extract_usage
+    )
+    return rehydrate(result) if isinstance(result, dict) else result
 
 
 def _apply_model_override(session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -142,13 +176,6 @@ def _apply_model_override(session: Any, kwargs: dict[str, Any]) -> dict[str, Any
     if override and "model" in kwargs and kwargs["model"] != override:
         return {**kwargs, "model": override}
     return kwargs
-
-
-def _stamp_usage(session: Any, obj: Any) -> None:
-    if session.engine.timeline:
-        inter = session.engine.timeline[-1]
-        if inter.usage is None:
-            inter.usage = _extract_usage(obj)
 
 
 class OpenAIAdapter(Adapter):

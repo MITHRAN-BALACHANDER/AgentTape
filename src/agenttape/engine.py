@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -82,15 +83,23 @@ class Engine:
         self.executed: list[Interaction] = []
         # The full served timeline (replayed + executed), in call order.
         self.timeline: list[Interaction] = []
-        # Re-entrancy depth: while an executor runs we are "inside" a boundary, so a
-        # nested interception (e.g. the httpx fallback firing during an OpenAI call
-        # the openai adapter already wrapped) passes through instead of double
-        # recording. The outermost boundary is the one captured.
-        self._depth = 0
-        # Per-kind ordinal counter for ordered matching context.
-        self._ordinal: dict[tuple[str, str], int] = {}
+        # Re-entrancy guard. While an executor runs we are "inside" a boundary, so a
+        # nested interception *in the same logical call* (e.g. the httpx fallback
+        # firing during an OpenAI call the openai adapter already wrapped) must pass
+        # through instead of double recording. This is tracked with a ContextVar so
+        # that **concurrent** calls (asyncio tasks / threads) each carry an
+        # independent depth: a sibling task awaiting *its own* executor must never be
+        # mistaken for a nested call. A plain instance counter would conflate the two
+        # and — during replay — silently execute a concurrent frozen boundary for
+        # real, defeating the side-effect guardrail.
+        self._depth: ContextVar[int] = ContextVar("agenttape_engine_depth", default=0)
 
-        self._index = self._build_index() if not self.flags.ignore_existing else {}
+        # Recorded slots indexed in recorded order per (kind, boundary), plus one key
+        # index per configured matcher for the fallback chain.
+        self._slots_by_kb: dict[tuple[str, str], list[_RecordedSlot]] = {}
+        self._key_indexes: list[dict[tuple[str, str, str], list[_RecordedSlot]]] = []
+        if not self.flags.ignore_existing:
+            self._build_indexes()
 
     # -- public interception ---------------------------------------------- #
 
@@ -103,6 +112,7 @@ class Engine:
         executor: Executor | None = None,
         usage: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        usage_extractor: Callable[[Any], dict[str, Any] | None] | None = None,
     ) -> Any:
         """Replay or execute a boundary crossing and return its response.
 
@@ -111,14 +121,14 @@ class Engine:
         """
 
         boundary = boundary or kind
-        if self._depth > 0:
-            # Nested inside another boundary's real execution: pass through.
+        if self._depth.get() > 0:
+            # Nested inside *this* logical call's real execution: pass through.
             return executor() if executor is not None else None
         live = self._is_live(kind, boundary)
         match_key = self._key_for(request)
 
         if not live and self.flags.replay_existing:
-            slot = self._find_match(kind, boundary, match_key)
+            slot = self._find_match(kind, boundary, request)
             if slot is not None:
                 slot.consumed = True
                 self.timeline.append(slot.interaction)
@@ -131,7 +141,14 @@ class Engine:
         if executor is None:
             raise self._unmatched(kind, boundary, request, match_key)
         return self._execute_and_record(
-            kind, request, boundary, executor, match_key, usage=usage, tags=tags
+            kind,
+            request,
+            boundary,
+            executor,
+            match_key,
+            usage=usage,
+            tags=tags,
+            usage_extractor=usage_extractor,
         )
 
     async def aintercept(
@@ -143,17 +160,18 @@ class Engine:
         executor: Callable[[], Any] | None = None,
         usage: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        usage_extractor: Callable[[Any], dict[str, Any] | None] | None = None,
     ) -> Any:
         """Async counterpart to :meth:`intercept` for coroutine boundaries."""
 
         boundary = boundary or kind
-        if self._depth > 0:
+        if self._depth.get() > 0:
             return await executor() if executor is not None else None
         live = self._is_live(kind, boundary)
         match_key = self._key_for(request)
 
         if not live and self.flags.replay_existing:
-            slot = self._find_match(kind, boundary, match_key)
+            slot = self._find_match(kind, boundary, request)
             if slot is not None:
                 slot.consumed = True
                 self.timeline.append(slot.interaction)
@@ -164,7 +182,14 @@ class Engine:
         if executor is None:
             raise self._unmatched(kind, boundary, request, match_key)
         return await self._aexecute_and_record(
-            kind, request, boundary, executor, match_key, usage=usage, tags=tags
+            kind,
+            request,
+            boundary,
+            executor,
+            match_key,
+            usage=usage,
+            tags=tags,
+            usage_extractor=usage_extractor,
         )
 
     async def _aexecute_and_record(
@@ -177,42 +202,45 @@ class Engine:
         *,
         usage: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        usage_extractor: Callable[[Any], dict[str, Any] | None] | None = None,
     ) -> Any:
         start = time.perf_counter()
-        self._depth += 1
+        token = self._depth.set(self._depth.get() + 1)
         try:
             response = await executor()
         except BaseException as exc:
-            self._depth -= 1
             latency = (time.perf_counter() - start) * 1000.0
-            interaction = Interaction(
+            self._append(
+                Interaction(
+                    index=0,
+                    kind=kind,
+                    request=request,
+                    error=_serialize_exception(exc),
+                    match_key=match_key,
+                    latency_ms=round(latency, 3),
+                    boundary=boundary,
+                    tags=tags or [],
+                )
+            )
+            raise
+        finally:
+            self._depth.reset(token)
+        latency = (time.perf_counter() - start) * 1000.0
+        if usage is None and usage_extractor is not None:
+            usage = _safe_usage(usage_extractor, response)
+        self._append(
+            Interaction(
                 index=0,
                 kind=kind,
                 request=request,
-                error=_serialize_exception(exc),
+                response=_to_jsonable(response),
                 match_key=match_key,
                 latency_ms=round(latency, 3),
+                usage=usage,
                 boundary=boundary,
                 tags=tags or [],
             )
-            self.executed.append(interaction)
-            self.timeline.append(interaction)
-            raise
-        self._depth -= 1
-        latency = (time.perf_counter() - start) * 1000.0
-        interaction = Interaction(
-            index=0,
-            kind=kind,
-            request=request,
-            response=_to_jsonable(response),
-            match_key=match_key,
-            latency_ms=round(latency, 3),
-            usage=usage,
-            boundary=boundary,
-            tags=tags or [],
         )
-        self.executed.append(interaction)
-        self.timeline.append(interaction)
         return response
 
     # -- output ------------------------------------------------------------ #
@@ -251,48 +279,50 @@ class Engine:
         matcher = self.matchers[0]
         return matcher.key(request, self.ignore_fields)
 
-    def _build_index(self) -> dict[tuple[str, str, str], list[_RecordedSlot]]:
-        index: dict[tuple[str, str, str], list[_RecordedSlot]] = {}
-        matcher = self.matchers[0] if self.matchers else None
+    def _build_indexes(self) -> None:
+        slots: list[tuple[Interaction, str, _RecordedSlot]] = []
         for interaction in self.recorded.interactions:
             boundary = interaction.boundary or interaction.kind
-            if matcher is not None and not is_ordered(matcher):
-                key = matcher.key(interaction.request, self.ignore_fields)
-            else:
-                key = (
-                    interaction.match_key or matcher.key(interaction.request, self.ignore_fields)
-                    if matcher
-                    else interaction.match_key
-                )
             slot = _RecordedSlot(interaction)
-            index.setdefault((interaction.kind, boundary, key), []).append(slot)
-            # Also index by stored match_key so hand-written keys still resolve.
-            if interaction.match_key and interaction.match_key != key:
-                index.setdefault((interaction.kind, boundary, interaction.match_key), []).append(
-                    slot
-                )
-        return index
+            self._slots_by_kb.setdefault((interaction.kind, boundary), []).append(slot)
+            slots.append((interaction, boundary, slot))
+        # One key index per matcher, so the fallback chain can try each in turn.
+        for matcher in self.matchers:
+            index: dict[tuple[str, str, str], list[_RecordedSlot]] = {}
+            if not is_ordered(matcher):
+                for interaction, boundary, slot in slots:
+                    key = matcher.key(interaction.request, self.ignore_fields)
+                    index.setdefault((interaction.kind, boundary, key), []).append(slot)
+                    # Also index by stored match_key so hand-written keys (and keys
+                    # computed before redaction) still resolve.
+                    if interaction.match_key and interaction.match_key != key:
+                        index.setdefault(
+                            (interaction.kind, boundary, interaction.match_key), []
+                        ).append(slot)
+            self._key_indexes.append(index)
 
-    def _find_match(self, kind: str, boundary: str, key: str) -> _RecordedSlot | None:
-        matcher = self.matchers[0]
-        if is_ordered(matcher):
-            # Pure order: consume the next unconsumed of this (kind, boundary).
-            for slots in self._slots_for_kind(kind, boundary):
-                for slot in slots:
-                    if not slot.consumed:
-                        return slot
-            return None
-        keyed = self._index.get((kind, boundary, key))
-        if keyed:
-            for slot in keyed:
-                if not slot.consumed:
-                    return slot
+    def _find_match(
+        self, kind: str, boundary: str, request: dict[str, Any]
+    ) -> _RecordedSlot | None:
+        # Fallback chain: try each configured matcher in order; the first one that
+        # resolves to an unconsumed recording wins. With a single matcher (the
+        # default) this is exactly the previous keyed-or-ordered behaviour.
+        for matcher, index in zip(self.matchers, self._key_indexes, strict=False):
+            if is_ordered(matcher):
+                slot = self._next_ordered(kind, boundary)
+            else:
+                key = matcher.key(request, self.ignore_fields)
+                slot = _first_unconsumed(index.get((kind, boundary, key)))
+            if slot is not None:
+                return slot
         return None
 
-    def _slots_for_kind(self, kind: str, boundary: str) -> Iterable[list[_RecordedSlot]]:
-        for (k, b, _key), slots in self._index.items():
-            if k == kind and b == boundary:
-                yield slots
+    def _next_ordered(self, kind: str, boundary: str) -> _RecordedSlot | None:
+        # Pure order: consume the next unconsumed of this (kind, boundary).
+        for slot in self._slots_by_kb.get((kind, boundary), []):
+            if not slot.consumed:
+                return slot
+        return None
 
     # -- execution + recording -------------------------------------------- #
 
@@ -306,46 +336,64 @@ class Engine:
         *,
         usage: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        usage_extractor: Callable[[Any], dict[str, Any] | None] | None = None,
     ) -> Any:
         start = time.perf_counter()  # perf_counter is never frozen
-        error: dict[str, Any] | None = None
-        response: Any = None
-        self._depth += 1
+        token = self._depth.set(self._depth.get() + 1)
         try:
             response = executor()
         except BaseException as exc:
-            self._depth -= 1
-            error = _serialize_exception(exc)
             latency = (time.perf_counter() - start) * 1000.0
-            interaction = Interaction(
+            self._append(
+                Interaction(
+                    index=0,
+                    kind=kind,
+                    request=request,
+                    error=_serialize_exception(exc),
+                    match_key=match_key,
+                    latency_ms=round(latency, 3),
+                    boundary=boundary,
+                    tags=tags or [],
+                )
+            )
+            raise
+        finally:
+            self._depth.reset(token)
+        latency = (time.perf_counter() - start) * 1000.0
+        if usage is None and usage_extractor is not None:
+            usage = _safe_usage(usage_extractor, response)
+        self._append(
+            Interaction(
                 index=0,
                 kind=kind,
                 request=request,
-                error=error,
+                response=_to_jsonable(response),
                 match_key=match_key,
                 latency_ms=round(latency, 3),
+                usage=usage,
                 boundary=boundary,
                 tags=tags or [],
             )
-            self.executed.append(interaction)
-            self.timeline.append(interaction)
-            raise
-        self._depth -= 1
-        latency = (time.perf_counter() - start) * 1000.0
-        interaction = Interaction(
-            index=0,
-            kind=kind,
-            request=request,
-            response=_to_jsonable(response),
-            match_key=match_key,
-            latency_ms=round(latency, 3),
-            usage=usage,
-            boundary=boundary,
-            tags=tags or [],
         )
+        return response
+
+    def _append(self, interaction: Interaction) -> None:
+        # list.append is atomic under the GIL, so this is safe for the concurrent
+        # (asyncio / threaded) recording paths.
         self.executed.append(interaction)
         self.timeline.append(interaction)
-        return response
+
+    def executes_for_real(self, kind: str, boundary: str | None = None) -> bool:
+        """True if a fresh call to this boundary would run live rather than replay.
+
+        Adapters use this to decide whether passing a call through to the real
+        service (e.g. a streaming response, which cannot be recorded
+        deterministically) is legitimate, or would silently break the offline-replay
+        guarantee and must instead raise.
+        """
+
+        boundary = boundary or kind
+        return self._is_live(kind, boundary) or self.flags.record_new
 
     # -- replay reconstruction -------------------------------------------- #
 
@@ -443,16 +491,81 @@ def _serialize_exception(exc: BaseException) -> dict[str, Any]:
     }
 
 
-def _raise_recorded_error(error: dict[str, Any]) -> None:
-    import builtins
+def _safe_usage(
+    extractor: Callable[[Any], dict[str, Any] | None], response: Any
+) -> dict[str, Any] | None:
+    try:
+        return extractor(response)
+    except Exception:  # pragma: no cover - usage extraction must never break recording
+        return None
 
-    type_name = error.get("type", "ReplayedError")
+
+def _first_unconsumed(slots: list[_RecordedSlot] | None) -> _RecordedSlot | None:
+    if not slots:
+        return None
+    for slot in slots:
+        if not slot.consumed:
+            return slot
+    return None
+
+
+def _raise_recorded_error(error: dict[str, Any]) -> None:
+    type_name = str(error.get("type", "ReplayedError"))
+    module_name = str(error.get("module", "builtins"))
     message = error.get("message", "")
-    exc_cls: type[BaseException] = RuntimeError
+    exc_cls = _resolve_exception_class(module_name, type_name)
+    raise _instantiate_exception(exc_cls, message, type_name)
+
+
+def _resolve_exception_class(module_name: str, type_name: str) -> type[BaseException]:
+    """Resolve a recorded exception back to its real class when importable.
+
+    Builtins are resolved first; otherwise the recorded module is imported (a local
+    operation, never a network call) so a replayed ``openai.RateLimitError`` or a
+    user-defined exception is raised as its true type — which is what ``except`` /
+    ``pytest.raises`` clauses match on. Falls back to ``RuntimeError`` if the type
+    cannot be located.
+    """
+
+    import builtins
+    import importlib
+
     candidate = getattr(builtins, type_name, None)
     if isinstance(candidate, type) and issubclass(candidate, BaseException):
-        exc_cls = candidate
-    raise exc_cls(message)
+        return candidate
+    if module_name and module_name not in ("builtins", "__builtin__"):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            module = None
+        if module is not None:
+            candidate = getattr(module, type_name, None)
+            if isinstance(candidate, type) and issubclass(candidate, BaseException):
+                return candidate
+    return RuntimeError
+
+
+def _instantiate_exception(
+    exc_cls: type[BaseException], message: Any, type_name: str
+) -> BaseException:
+    """Best-effort construction of ``exc_cls`` with ``message``.
+
+    Some library exceptions require keyword-only constructor args (e.g. the OpenAI
+    SDK errors need a ``response``); when the simple call fails we bypass ``__init__``
+    so the replayed error still carries the correct *type* even if not every field is
+    reconstructed. As a last resort a ``RuntimeError`` preserves the original name.
+    """
+
+    try:
+        return exc_cls(message)
+    except Exception:
+        pass
+    try:
+        exc = exc_cls.__new__(exc_cls)
+        BaseException.__init__(exc, message)
+        return exc
+    except Exception:  # pragma: no cover - exotic exception types
+        return RuntimeError(f"{type_name}: {message}")
 
 
 def diff_fields(expected: Any, received: Any, path: str = "") -> list[FieldDiff]:

@@ -20,6 +20,7 @@ Inside your patched callable, fetch ``agenttape.active_session()``; if it is
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 
@@ -46,24 +47,30 @@ class RefCountedPatch:
     def __init__(self) -> None:
         self._count = 0
         self._restores: list[Any] = []
+        # Guards the refcount + restore list so concurrent session enter/exit (across
+        # threads) can't corrupt the count and leak or prematurely drop the patch.
+        self._lock = threading.RLock()
 
     @property
     def active(self) -> bool:
-        return self._count > 0
+        with self._lock:
+            return self._count > 0
 
     def acquire(self, install_fn: Any) -> None:
-        if self._count == 0:
-            self._restores = install_fn() or []
-        self._count += 1
+        with self._lock:
+            if self._count == 0:
+                self._restores = install_fn() or []
+            self._count += 1
 
     def release(self) -> None:
-        if self._count == 0:
-            return
-        self._count -= 1
-        if self._count == 0:
-            for restore in reversed(self._restores):
-                try:
-                    restore()
-                except Exception:  # pragma: no cover - defensive cleanup
-                    pass
-            self._restores = []
+        with self._lock:
+            if self._count == 0:
+                return
+            self._count -= 1
+            if self._count == 0:
+                for restore in reversed(self._restores):
+                    try:
+                        restore()
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        pass
+                self._restores = []

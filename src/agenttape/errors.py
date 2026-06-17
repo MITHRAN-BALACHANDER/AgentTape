@@ -35,6 +35,15 @@ class SchemaVersionError(AgentTapeError):
     """
 
 
+class StreamingReplayError(AgentTapeError):
+    """Raised when a streaming LLM call is made during offline replay.
+
+    Streaming responses cannot be reconstructed deterministically, so rather than
+    silently calling the real service in a mode that promises zero network access,
+    AgentTape raises. Record without ``stream=True`` or mark the boundary ``live``.
+    """
+
+
 class FieldDiff:
     """A single field-level difference between an incoming and a recorded request."""
 
@@ -128,6 +137,15 @@ class DeterminismDriftWarning(UserWarning):
 
     For example, a whitelisted environment variable changed value between record
     and replay. Non-fatal by design; surfaces silently-broken determinism early.
+    """
+
+
+class StreamingNotRecordedWarning(UserWarning):
+    """Warning emitted when a streaming call runs live but is not captured.
+
+    In a recording disposition a streaming response is allowed to reach the real
+    service (we are executing for real anyway), but it cannot be captured into the
+    cassette deterministically, so nothing is recorded for that call.
     """
 
 

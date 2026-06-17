@@ -7,6 +7,15 @@ run to run and break replay matching. The freeze layer pins them to recorded val
 Each feature is opt-in per cassette (``freeze=["clock", "uuid", "random"]``) and on
 by default in ``mode="none"``. The recorded base values live in ``cassette.meta``
 under ``freeze`` so replay reproduces them byte-for-byte across machines.
+
+Concurrency: the global callables (``time.time``, ``datetime``, ``uuid.uuid4``) are
+patched **once** via a reference-counted, lock-guarded installer, and the patched
+functions **dispatch through the freeze controller active in the current context**
+(a :class:`~contextvars.ContextVar`). This means two sessions running concurrently
+on different threads — or many asyncio tasks under one session — no longer stomp on
+each other's patches, and the real callables are never permanently lost. (``random``
+seeding and the env snapshot are inherently process-global and remain so; a thread
+that does not inherit the freeze context simply sees the real clock, which is safe.)
 """
 
 from __future__ import annotations
@@ -15,10 +24,12 @@ import datetime as _dt
 import os
 import random
 import sys
+import threading
 import time
 import uuid
 import warnings
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 from .errors import DeterminismDriftWarning
@@ -33,6 +44,9 @@ _REAL_DATE = _dt.date
 _REAL_UUID4 = uuid.uuid4
 
 _FROZEN_NAMESPACE = uuid.UUID("a9f1c2d3-0000-4000-8000-000000000000")
+
+# The freeze controller that applies in the current execution context, or None.
+_ACTIVE: ContextVar[FreezeController | None] = ContextVar("agenttape_active_freeze", default=None)
 
 
 class FreezeController:
@@ -68,16 +82,33 @@ class FreezeController:
         self._mono_counter = 0.0
         # Env bookkeeping.
         self._env_snapshot: dict[str, str] = dict(self.state.get("env", {}))
+        # Lifecycle bookkeeping.
+        self._token: Any = None
+        self._clock_installed = False
+        self._uuid_installed = False
 
     # -- lifecycle --------------------------------------------------------- #
 
     def __enter__(self) -> FreezeController:
+        if "clock" in self.features and not self.replay:
+            # Recording: pin the clock to "now" and record that base. We still freeze
+            # during record so the agent observes the *same* clock value it will see
+            # on replay (cross-run determinism). Latency stays accurate because it is
+            # measured with time.perf_counter, which is never patched.
+            self._base_time = _REAL_TIME()
+            self._base_iso = _REAL_DATETIME.fromtimestamp(
+                self._base_time, _dt.timezone.utc
+            ).isoformat()
+        # Make this controller the one the patched globals dispatch through.
+        self._token = _ACTIVE.set(self)
         if "clock" in self.features:
-            self._freeze_clock()
+            _install_clock()
+            self._clock_installed = True
+        if "uuid" in self.features:
+            _install_uuid()
+            self._uuid_installed = True
         if "random" in self.features:
             self._freeze_random()
-        if "uuid" in self.features:
-            self._freeze_uuid()
         if self.env_whitelist:
             self._handle_env()
         return self
@@ -89,6 +120,18 @@ class FreezeController:
             except Exception:  # pragma: no cover - defensive cleanup
                 pass
         self._restores.clear()
+        if self._uuid_installed:
+            _uninstall_uuid()
+            self._uuid_installed = False
+        if self._clock_installed:
+            _uninstall_clock()
+            self._clock_installed = False
+        if self._token is not None:
+            try:
+                _ACTIVE.reset(self._token)
+            except (ValueError, LookupError):  # pragma: no cover - context mismatch
+                _ACTIVE.set(None)
+            self._token = None
 
     # -- serialization ----------------------------------------------------- #
 
@@ -107,60 +150,29 @@ class FreezeController:
             data["env"] = self._env_snapshot if self.replay else _read_env(self.env_whitelist)
         return data
 
-    # -- clock ------------------------------------------------------------- #
+    # -- clock dispatch ---------------------------------------------------- #
 
-    def _freeze_clock(self) -> None:
-        if not self.replay:
-            # Recording: pin the clock to "now" and record that base. We still freeze
-            # during record so the agent observes the *same* clock value it will see
-            # on replay (cross-run determinism). Latency stays accurate because it is
-            # measured with time.perf_counter, which is never patched.
-            self._base_time = _REAL_TIME()
-            self._base_iso = _REAL_DATETIME.fromtimestamp(
-                self._base_time, _dt.timezone.utc
-            ).isoformat()
+    def _time(self) -> float:
+        return self._base_time
 
-        base = self._base_time
+    def _monotonic(self) -> float:
+        self._mono_counter += 1e-6
+        return self._base_time + self._mono_counter
 
-        def fake_time() -> float:
-            return base
+    # -- uuid -------------------------------------------------------------- #
 
-        def fake_monotonic() -> float:
-            self._mono_counter += 1e-6
-            return base + self._mono_counter
-
-        self._patch(time, "time", fake_time)
-        self._patch(time, "monotonic", fake_monotonic)
-        self._patch(time, "time_ns", lambda: int(base * 1e9))
-        self._patch(time, "monotonic_ns", lambda: int((base + self._mono_counter) * 1e9))
-        self._freeze_datetime(base)
-
-    def _freeze_datetime(self, base: float) -> None:
-        frozen_dt = _make_frozen_datetime(base)
-        frozen_date = _make_frozen_date(base)
-
-        # Replace in the datetime module and in every already-imported module that
-        # holds a direct reference to the real classes (freezegun-lite).
-        targets_dt: list[tuple[Any, str, Any]] = []
-        for module in list(sys.modules.values()):
-            if module is None:
-                continue
-            try:
-                members = list(vars(module).items())
-            except TypeError:  # pragma: no cover - some modules disallow vars()
-                continue
-            for name, value in members:
-                if value is _REAL_DATETIME:
-                    targets_dt.append((module, name, frozen_dt))
-                elif value is _REAL_DATE:
-                    targets_dt.append((module, name, frozen_date))
-        for module, name, replacement in targets_dt:
-            try:
-                original = getattr(module, name)
-                setattr(module, name, replacement)
-                self._restores.append(_restorer(module, name, original))
-            except Exception:  # pragma: no cover - read-only attrs
-                continue
+    def _next_uuid(self) -> uuid.UUID:
+        if self.replay:
+            if self._uuid_index < len(self._recorded_uuids):
+                value = self._recorded_uuids[self._uuid_index]
+            else:
+                # Deterministic fallback for calls beyond what was recorded.
+                value = str(uuid.uuid5(_FROZEN_NAMESPACE, str(self._uuid_index)))
+            self._uuid_index += 1
+            return uuid.UUID(value)
+        value = str(_REAL_UUID4())
+        self._captured_uuids.append(value)
+        return uuid.UUID(value)
 
     # -- random ------------------------------------------------------------ #
 
@@ -181,30 +193,6 @@ class FreezeController:
         self._restores.append(lambda: np.random.set_state(prev))
         np.random.seed(self.random_seed)
 
-    # -- uuid -------------------------------------------------------------- #
-
-    def _freeze_uuid(self) -> None:
-        if self.replay:
-
-            def replay_uuid4() -> uuid.UUID:
-                if self._uuid_index < len(self._recorded_uuids):
-                    value = self._recorded_uuids[self._uuid_index]
-                else:
-                    # Deterministic fallback for calls beyond what was recorded.
-                    value = str(uuid.uuid5(_FROZEN_NAMESPACE, str(self._uuid_index)))
-                self._uuid_index += 1
-                return uuid.UUID(value)
-
-            self._patch(uuid, "uuid4", replay_uuid4)
-        else:
-
-            def record_uuid4() -> uuid.UUID:
-                value = _REAL_UUID4()
-                self._captured_uuids.append(str(value))
-                return value
-
-            self._patch(uuid, "uuid4", record_uuid4)
-
     # -- env --------------------------------------------------------------- #
 
     def _handle_env(self) -> None:
@@ -223,12 +211,178 @@ class FreezeController:
         else:
             self._env_snapshot = _read_env(self.env_whitelist)
 
-    # -- helpers ----------------------------------------------------------- #
 
-    def _patch(self, target: Any, name: str, replacement: Any) -> None:
+# --------------------------------------------------------------------------- #
+# Global, reference-counted patch installers (context-dispatching)
+# --------------------------------------------------------------------------- #
+
+_INSTALL_LOCK = threading.RLock()
+_clock_count = 0
+_uuid_count = 0
+_clock_restores: list[Callable[[], None]] = []
+_uuid_restores: list[Callable[[], None]] = []
+
+
+def _active_clock() -> FreezeController | None:
+    fc = _ACTIVE.get()
+    return fc if fc is not None and "clock" in fc.features else None
+
+
+def _dispatch_time() -> float:
+    fc = _active_clock()
+    return fc._time() if fc is not None else _REAL_TIME()
+
+
+def _dispatch_monotonic() -> float:
+    fc = _active_clock()
+    return fc._monotonic() if fc is not None else _REAL_MONOTONIC()
+
+
+def _dispatch_time_ns() -> int:
+    fc = _active_clock()
+    return int(fc._time() * 1e9) if fc is not None else _REAL_TIME_NS()
+
+
+def _dispatch_monotonic_ns() -> int:
+    fc = _active_clock()
+    return int(fc._monotonic() * 1e9) if fc is not None else _REAL_MONOTONIC_NS()
+
+
+def _dispatch_uuid4() -> uuid.UUID:
+    fc = _ACTIVE.get()
+    if fc is not None and "uuid" in fc.features:
+        return fc._next_uuid()
+    return _REAL_UUID4()
+
+
+class _FrozenDateTime(_REAL_DATETIME):
+    """``datetime`` subclass whose ``now``/``utcnow``/``today`` follow the freeze."""
+
+    @classmethod
+    def now(cls, tz: Any = None) -> Any:
+        fc = _active_clock()
+        if fc is None:
+            return _REAL_DATETIME.now(tz)
+        moment = _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc)
+        return moment.astimezone(tz) if tz is not None else moment.replace(tzinfo=None)
+
+    @classmethod
+    def utcnow(cls) -> Any:
+        fc = _active_clock()
+        if fc is None:
+            return _REAL_DATETIME.now(_dt.timezone.utc).replace(tzinfo=None)
+        return _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc).replace(tzinfo=None)
+
+    @classmethod
+    def today(cls) -> Any:
+        fc = _active_clock()
+        if fc is None:
+            return _REAL_DATETIME.today()
+        return _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc).replace(tzinfo=None)
+
+
+class _FrozenDate(_REAL_DATE):
+    """``date`` subclass whose ``today`` follows the freeze."""
+
+    @classmethod
+    def today(cls) -> Any:
+        fc = _active_clock()
+        if fc is None:
+            return _REAL_DATE.today()
+        return _REAL_DATETIME.fromtimestamp(fc._base_time, _dt.timezone.utc).date()
+
+
+def _install_clock() -> None:
+    global _clock_count
+    with _INSTALL_LOCK:
+        if _clock_count == 0:
+            _clock_restores.extend(_patch_clock_globals())
+        _clock_count += 1
+
+
+def _uninstall_clock() -> None:
+    global _clock_count
+    with _INSTALL_LOCK:
+        if _clock_count == 0:
+            return
+        _clock_count -= 1
+        if _clock_count == 0:
+            _run_restores(_clock_restores)
+
+
+def _install_uuid() -> None:
+    global _uuid_count
+    with _INSTALL_LOCK:
+        if _uuid_count == 0:
+            original = uuid.uuid4
+            setattr(uuid, "uuid4", _dispatch_uuid4)  # noqa: B010 - dynamic patch target
+            _uuid_restores.append(_restorer(uuid, "uuid4", original))
+        _uuid_count += 1
+
+
+def _uninstall_uuid() -> None:
+    global _uuid_count
+    with _INSTALL_LOCK:
+        if _uuid_count == 0:
+            return
+        _uuid_count -= 1
+        if _uuid_count == 0:
+            _run_restores(_uuid_restores)
+
+
+def _patch_clock_globals() -> list[Callable[[], None]]:
+    restores: list[Callable[[], None]] = []
+
+    def patch(target: Any, name: str, replacement: Any) -> None:
         original = getattr(target, name)
         setattr(target, name, replacement)
-        self._restores.append(_restorer(target, name, original))
+        restores.append(_restorer(target, name, original))
+
+    patch(time, "time", _dispatch_time)
+    patch(time, "monotonic", _dispatch_monotonic)
+    patch(time, "time_ns", _dispatch_time_ns)
+    patch(time, "monotonic_ns", _dispatch_monotonic_ns)
+    # Replace the real datetime/date classes in every already-imported module that
+    # holds a direct reference (freezegun-lite). The frozen classes dispatch through
+    # the active controller, so this single set of classes serves every session.
+    #
+    # Bind the comparison targets to locals and skip this module: the scan would
+    # otherwise reassign our own ``_REAL_DATETIME`` / ``_REAL_DATE`` constants (they
+    # *are* the real classes), which both breaks the ``is`` test for every module
+    # visited afterwards and corrupts the constants the dispatch methods rely on.
+    real_dt, real_date = _REAL_DATETIME, _REAL_DATE
+    this_module = sys.modules.get(__name__)
+    for module in list(sys.modules.values()):
+        if module is None or module is this_module:
+            continue
+        try:
+            members = list(vars(module).items())
+        except TypeError:  # pragma: no cover - some modules disallow vars()
+            continue
+        for name, value in members:
+            if value is real_dt:
+                _try_swap(module, name, _FrozenDateTime, restores)
+            elif value is real_date:
+                _try_swap(module, name, _FrozenDate, restores)
+    return restores
+
+
+def _try_swap(module: Any, name: str, replacement: Any, restores: list[Callable[[], None]]) -> None:
+    try:
+        original = getattr(module, name)
+        setattr(module, name, replacement)
+        restores.append(_restorer(module, name, original))
+    except Exception:  # pragma: no cover - read-only attrs
+        return
+
+
+def _run_restores(restores: list[Callable[[], None]]) -> None:
+    for restore in reversed(restores):
+        try:
+            restore()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+    restores.clear()
 
 
 def _restorer(target: Any, name: str, original: Any) -> Callable[[], None]:
@@ -240,38 +394,6 @@ def _restorer(target: Any, name: str, original: Any) -> Callable[[], None]:
 
 def _read_env(whitelist: tuple[str, ...]) -> dict[str, str]:
     return {key: os.environ[key] for key in whitelist if key in os.environ}
-
-
-def _make_frozen_datetime(base: float) -> type:
-    frozen_moment = _REAL_DATETIME.fromtimestamp(base, _dt.timezone.utc)
-
-    class FrozenDateTime(_REAL_DATETIME):
-        @classmethod
-        def now(cls, tz: Any = None) -> Any:
-            if tz is None:
-                return frozen_moment.replace(tzinfo=None)
-            return frozen_moment.astimezone(tz)
-
-        @classmethod
-        def utcnow(cls) -> Any:
-            return frozen_moment.replace(tzinfo=None)
-
-        @classmethod
-        def today(cls) -> Any:
-            return frozen_moment.replace(tzinfo=None)
-
-    return FrozenDateTime
-
-
-def _make_frozen_date(base: float) -> type:
-    frozen_day = _REAL_DATETIME.fromtimestamp(base, _dt.timezone.utc).date()
-
-    class FrozenDate(_REAL_DATE):
-        @classmethod
-        def today(cls) -> Any:
-            return frozen_day
-
-    return FrozenDate
 
 
 def default_features(config_freeze: tuple[str, ...], mode: str) -> set[str]:

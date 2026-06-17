@@ -52,7 +52,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agenttape", description="VCR.py for AI agents.")
+    parser = argparse.ArgumentParser(
+        prog="agenttape", description="Deterministic record/replay for AI agents."
+    )
     parser.add_argument("--version", action="version", version=f"agenttape {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true", help="show full tracebacks")
     sub = parser.add_subparsers(dest="command")

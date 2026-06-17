@@ -49,9 +49,36 @@
   box-shadow: none;
 }
 
-[data-md-color-scheme="default"] .md-header,
+/* Frosted glass: translucent background + blur, with the hairline border
+   fading in only once the page is scrolled (Material adds .md-header--shadow). */
+[data-md-color-scheme="default"] .md-header {
+  background-color: rgba(255, 255, 255, 0.72);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid transparent;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+[data-md-color-scheme="default"] .md-header--shadow {
+  background-color: rgba(255, 255, 255, 0.85);
+  border-bottom-color: var(--at-border);
+}
+
 [data-md-color-scheme="slate"] .md-header {
-  border-bottom: 1px solid var(--at-border);
+  background-color: rgba(10, 10, 10, 0.7);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid transparent;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+[data-md-color-scheme="slate"] .md-header--shadow {
+  background-color: rgba(10, 10, 10, 0.82);
+  border-bottom-color: var(--at-border);
 }
 
 .md-header__title {
@@ -101,6 +128,35 @@
 
 .md-search__output {
   border-radius: var(--at-radius);
+}
+
+/* Keyboard hint (Cmd/Ctrl + K). Label is set per-platform by shortcuts.js;
+   it hides while the search is open and on small screens. */
+.md-search__form::after {
+  content: var(--at-kbd, "Ctrl K");
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  transform: translateY(-50%);
+  padding: 1px 6px;
+  font-family: var(--md-code-font-family, monospace);
+  font-size: 0.6rem;
+  line-height: 1.4;
+  color: var(--at-faint);
+  background-color: var(--at-bg);
+  border: 1px solid var(--at-border-strong);
+  border-radius: 5px;
+  pointer-events: none;
+}
+
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form::after {
+  display: none;
+}
+
+@media screen and (max-width: 76.1875em) {
+  .md-search__form::after {
+    display: none;
+  }
 }
 
 /* ----------------------------------------------------------------------- */
