@@ -35,7 +35,8 @@ with agenttape.use_cassette("my_test", mode="none"):
     **Strict replay. Never touches the network.**
 
     - Matched request → returns the recording.
-    - New request, or missing cassette → raises [`UnmatchedInteractionError`](debugging.md) / `CassetteNotFoundError`.
+    - New request → raises [`UnmatchedInteractionError`](debugging.md).
+    - Missing cassette → starts with an empty recording, so the first request raises [`UnmatchedInteractionError`](debugging.md).
 
     This is the only mode that **guarantees** no network and no side effects. Use it in CI.
 

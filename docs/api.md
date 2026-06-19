@@ -292,7 +292,7 @@ All inherit from `agenttape.AgentTapeError`.
 | --- | --- |
 | `AgentTapeError` | Base class for all AgentTape errors |
 | `UnmatchedInteractionError` | A request has no matching recording during replay. Carries the canonical request, closest recording, and field-level diffs. ([Debugging](debugging.md)) |
-| `CassetteNotFoundError` | A cassette is required (e.g. `mode="none"`) but doesn't exist |
+| `CassetteNotFoundError` | The cassette file is missing when accessed directly via `read_cassette()` (e.g. CLI internals). `use_cassette()` does **not** raise this — a missing file in `mode="none"` causes the first interaction to raise `UnmatchedInteractionError` instead. |
 | `CassetteCorruptError` | A cassette can't be parsed or violates the schema |
 | `SchemaVersionError` | A cassette uses an unsupported schema version |
 | `ConfigError` | `agenttape.toml` is invalid (bad mode, bad format, …) |
