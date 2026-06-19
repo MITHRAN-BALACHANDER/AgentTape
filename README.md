@@ -10,7 +10,7 @@ AgentTape captures every external interaction your agent makes — both LLM call
 [![Python](https://img.shields.io/pypi/pyversions/agenttape.svg)](https://pypi.org/project/agenttape/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Full documentation:** https://MITHRAN-BALACHANDER.github.io/AgentTape/
+> **Full documentation:** https://agenttape.mithran.app/
 
 ---
 
