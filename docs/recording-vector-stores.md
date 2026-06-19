@@ -54,7 +54,7 @@ That separation is the whole point. Your retrieval is pinned; your assertions te
 
 ## Iterate prompts with Partial Replay
 
-RAG is the textbook use case for [Partial Replay](mixed-replay.md). Want to test whether `gpt-4o` synthesizes the retrieved docs better than the old model? Run the LLM live, serve retrieval from the cassette:
+RAG is the textbook use case for [Partial Replay](mixed-replay.md). Want to test whether `gpt-5.5` synthesizes the retrieved docs better than the old model? Run the LLM live, serve retrieval from the cassette:
 
 ```python
 import agenttape

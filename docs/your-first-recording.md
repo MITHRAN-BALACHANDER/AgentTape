@@ -29,7 +29,7 @@ from openai import OpenAI
 def get_random_color() -> str:
     client = OpenAI()
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.5",
         messages=[{"role": "user", "content": "Name a random color. One word."}],
     )
     return response.choices[0].message.content
@@ -114,7 +114,7 @@ interactions:
     boundary: llm
     request:
       endpoint: chat.completions
-      model: gpt-4o-mini
+      model: gpt-5.5
       messages:
         - role: user
           content: Name a random color. One word.

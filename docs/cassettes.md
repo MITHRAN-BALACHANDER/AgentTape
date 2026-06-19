@@ -29,7 +29,7 @@ interactions:
     boundary: llm
     request:
       endpoint: chat.completions
-      model: gpt-4o-mini
+      model: gpt-5.5
       messages:
         - role: user
           content: What is the weather in London?

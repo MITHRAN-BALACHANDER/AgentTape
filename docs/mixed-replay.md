@@ -10,7 +10,7 @@ title: Partial Replay
 
 ## The problem it solves
 
-You have a cassette of a complex run: the agent searched a vector DB, used a calculator, and wrote a row to PostgreSQL. Now you want to test whether a new system prompt — or upgrading `gpt-3.5` to `gpt-4o` — improves the agent.
+You have a cassette of a complex run: the agent searched a vector DB, used a calculator, and wrote a row to PostgreSQL. Now you want to test whether a new system prompt — or upgrading `gpt-3.5` to `gpt-5.5` — improves the agent.
 
 Your options *without* partial replay are both bad:
 

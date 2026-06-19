@@ -37,7 +37,7 @@ from openai import OpenAI
 with agenttape.use_cassette("api_test", mode="record"):
     client = OpenAI()
     client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.5",
         messages=[{"role": "user", "content": "Hello"}],
     )
 ```

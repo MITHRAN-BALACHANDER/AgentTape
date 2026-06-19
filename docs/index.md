@@ -33,7 +33,7 @@ from openai import OpenAI
 def run_agent():
     client = OpenAI()
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.5",
         messages=[{"role": "user", "content": "Say hi in 3 words"}],
     )
     return resp.choices[0].message.content

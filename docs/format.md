@@ -115,7 +115,7 @@ The shape of `request`/`response` depends on `kind`.
       boundary: llm
       request:
         endpoint: chat.completions
-        model: gpt-4o-mini
+        model: gpt-5.5
         messages:
           - { role: user, content: Hello }
       response:

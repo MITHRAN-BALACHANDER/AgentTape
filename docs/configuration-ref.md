@@ -21,7 +21,7 @@ ignore_volatile_fields = ["timestamp", "request_id", "x-request-id", "date", "no
 assets_threshold_bytes = 4096
 format = "yaml"
 env_snapshot = ["MODEL_TIER", "FEATURE_FLAGS"]
-# model_override = "gpt-4o"
+# model_override = "gpt-5.5"
 
 [redact]
 denylist = ["x-internal-token"]
